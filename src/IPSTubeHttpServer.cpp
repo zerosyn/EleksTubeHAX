@@ -321,7 +321,7 @@ void IPSTubeHttpServer::handleClockLayout()
   static const char *const allowed[] = {"screen", "clock"};
   for (JsonVariantConst value : array)
   {
-    if (!value.is<JsonObject>())
+    if (!value.is<JsonObjectConst>())
     {
       sendError(400, "INVALID_FIELD", "each clock layout entry must be an object");
       return;
