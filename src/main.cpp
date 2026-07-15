@@ -17,6 +17,11 @@
 #include "Clock.h"
 #include "Menu.h"
 #include "StoredConfig.h"
+#ifdef HARDWARE_IPSTUBE_CLOCK
+#include "IPSTubeDisplayController.h"
+#include "IPSTubeExtensionConfig.h"
+#include "IPSTubeHttpServer.h"
+#endif
 #include "TFTs.h"
 #include "WiFi_WPS.h"
 
@@ -172,6 +177,7 @@ uint32_t lastMQTTCommandExecuted = (uint32_t)-1;
 
 // Helper function, defined below.
 void updateClockDisplay(TFTs::show_t show = TFTs::yes);
+void savePersistentConfig();
 void setupMenu(void);
 #ifdef DIMMING
 bool isNightTime(uint8_t current_hour);
@@ -239,6 +245,45 @@ void setup()
   stored_config.load();
 
   backlights.begin(&stored_config.config.backlights);
+#ifdef HARDWARE_IPSTUBE_CLOCK
+  IPSTubeControl::BacklightEffect legacyEffect = IPSTubeControl::BacklightEffect::CONSTANT;
+  switch (backlights.getPattern())
+  {
+  case Backlights::dark:
+    legacyEffect = IPSTubeControl::BacklightEffect::OFF;
+    break;
+  case Backlights::rainbow:
+    legacyEffect = IPSTubeControl::BacklightEffect::RAINBOW;
+    break;
+  case Backlights::pulse:
+    legacyEffect = IPSTubeControl::BacklightEffect::PULSE;
+    break;
+  case Backlights::breath:
+    legacyEffect = IPSTubeControl::BacklightEffect::BREATH;
+    break;
+  case Backlights::test:
+  case Backlights::constant:
+  case Backlights::num_patterns:
+    legacyEffect = IPSTubeControl::BacklightEffect::CONSTANT;
+    break;
+  }
+  const IPSTubeControl::BacklightSettings legacyBacklight = {
+      legacyEffect,
+      backlights.getColor(),
+      backlights.getIntensity(),
+      backlights.getPulseRate(),
+      backlights.getBreathRate(),
+      backlights.getRainbowDuration()};
+  ipstubeExtensionConfig.begin(legacyBacklight);
+  const IPSTubeControl::PersistedConfigV1 &extension = ipstubeExtensionConfig.get();
+  backlights.loadControlSettings({
+      IPSTubeControl::BacklightEffect(extension.effect),
+      extension.color,
+      extension.brightness,
+      extension.pulseBpm,
+      extension.breathBpm,
+      extension.rainbowSeconds});
+#endif
 #ifndef NO_BUTTONS
   buttons.begin();
 #endif
@@ -246,6 +291,11 @@ void setup()
 
   // Setup the displays (TFTs) initaly and show bootup message(s).
   tfts.begin(); // ...and count number of clock faces available...
+#ifdef HARDWARE_IPSTUBE_CLOCK
+  ipstubeDisplay.begin(tfts);
+  ipstubeDisplay.loadPersistent(ipstubeExtensionConfig.get().roles,
+                                ipstubeExtensionConfig.get().savedImages);
+#endif
   tfts.fillScreen(TFT_BLACK);
 
   tfts.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -315,7 +365,7 @@ void setup()
     uclock.setTimeZoneOffset(GeoLocTZoffset * 3600);
     Serial.println();
     Serial.print("Saving config! Triggered by timezone change...");
-    stored_config.save();
+    savePersistentConfig();
     tfts.println("Done!");
     Serial.println("Done!");
     tfts.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -355,7 +405,13 @@ void setup()
   // Start up the clock displays.
   tfts.fillScreen(TFT_BLACK);
   uclock.loop();
+#ifdef HARDWARE_IPSTUBE_CLOCK
+  ipstubeDisplay.restoreManualImages();
+#endif
   updateClockDisplay(TFTs::force); // Draw all the clock digits
+#ifdef HARDWARE_IPSTUBE_CLOCK
+  ipstubeHttpServer.begin();
+#endif
   Serial.println("Starting main loop...");
 }
 
@@ -368,6 +424,9 @@ void loop()
 
   // Do all the maintenance work.
   WifiReconnect(); // If not connected to WiFi, attempt to reconnect
+#ifdef HARDWARE_IPSTUBE_CLOCK
+  ipstubeHttpServer.loop();
+#endif
 
 #if defined(MQTT_PLAIN_ENABLED) || defined(MQTT_HOME_ASSISTANT)
   MQTTLoopFrequently();
@@ -584,7 +643,7 @@ void loop()
       lastMQTTCommandExecuted = -1;
 
       Serial.print("Saving config...");
-      stored_config.save();
+      savePersistentConfig();
       Serial.println(" Done.");
     }
   }
@@ -670,7 +729,7 @@ void loop()
       updateClockDisplay(TFTs::force); // Redraw everything
       Serial.println();
       Serial.print("Saving config! Triggered from leaving menu...");
-      stored_config.save();
+      savePersistentConfig();
       Serial.println(" Done.");
     }
     else
@@ -1183,6 +1242,17 @@ void processGeoLocUpdate()
 
 void updateClockDisplay(TFTs::show_t show)
 {
+#ifdef HARDWARE_IPSTUBE_CLOCK
+  IPSTubeControl::ClockDigits digits = {
+      uint8_t(uclock.getHoursTens() == TFTs::blanked ? 0 : uclock.getHoursTens()),
+      uclock.getHoursOnes(),
+      uclock.getMinutesTens(),
+      uclock.getMinutesOnes(),
+      uclock.getSecondsTens(),
+      uclock.getSecondsOnes(),
+      uclock.getHoursTens() == TFTs::blanked};
+  ipstubeDisplay.updateClock(digits, show == TFTs::force);
+#else
   // Refresh, starting with seconds.
   tfts.setDigit(SECONDS_ONES, uclock.getSecondsOnes(), show);
   tfts.setDigit(SECONDS_TENS, uclock.getSecondsTens(), show);
@@ -1190,4 +1260,27 @@ void updateClockDisplay(TFTs::show_t show)
   tfts.setDigit(MINUTES_TENS, uclock.getMinutesTens(), show);
   tfts.setDigit(HOURS_ONES, uclock.getHoursOnes(), show);
   tfts.setDigit(HOURS_TENS, uclock.getHoursTens(), show);
+#endif
+}
+
+void savePersistentConfig()
+{
+  stored_config.save();
+#ifdef HARDWARE_IPSTUBE_CLOCK
+  if (backlights.persistenceRequested())
+  {
+    IPSTubeControl::PersistedConfigV1 next = ipstubeExtensionConfig.get();
+    const IPSTubeControl::BacklightSettings &light = backlights.getPersistenceSettings();
+    next.effect = uint8_t(light.effect);
+    next.color = light.color;
+    next.brightness = light.brightness;
+    next.pulseBpm = light.pulseBpm;
+    next.breathBpm = light.breathBpm;
+    next.rainbowSeconds = light.rainbowSeconds;
+    if (ipstubeExtensionConfig.save(next))
+      backlights.clearPersistenceRequested();
+    else
+      Serial.println("IPSTube extension config save failed.");
+  }
+#endif
 }

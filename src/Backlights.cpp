@@ -55,13 +55,83 @@ void Backlights::adjustIntensity(int16_t adj)
 
 void Backlights::setIntensity(uint8_t intensity)
 {
+  if (intensity >= max_intensity)
+    intensity = max_intensity - 1;
   config->intensity = intensity;
   setBrightness(0xFF >> max_intensity - config->intensity - 1);
   pattern_needs_init = true;
+#ifdef HARDWARE_IPSTUBE_CLOCK
+  if (controlActive_)
+  {
+    controlledSettings_.brightness = intensity;
+    markLegacyChange();
+  }
+#endif
+}
+
+Backlights::patterns Backlights::getPattern()
+{
+#ifdef HARDWARE_IPSTUBE_CLOCK
+  if (controlActive_)
+    return effectToPattern(controlledSettings_.effect);
+#endif
+  return patterns(config->pattern);
+}
+
+uint8_t Backlights::getPulseRate()
+{
+#ifdef HARDWARE_IPSTUBE_CLOCK
+  if (controlActive_)
+    return controlledSettings_.pulseBpm;
+#endif
+  return config->pulse_bpm;
+}
+
+uint8_t Backlights::getBreathRate()
+{
+#ifdef HARDWARE_IPSTUBE_CLOCK
+  if (controlActive_)
+    return controlledSettings_.breathBpm;
+#endif
+  return config->breath_per_min;
+}
+
+float Backlights::getRainbowDuration()
+{
+#ifdef HARDWARE_IPSTUBE_CLOCK
+  if (controlActive_)
+    return controlledSettings_.rainbowSeconds;
+#endif
+  return config->rainbow_sec;
+}
+
+uint8_t Backlights::getIntensity()
+{
+#ifdef HARDWARE_IPSTUBE_CLOCK
+  if (controlActive_)
+    return controlledSettings_.brightness;
+#endif
+  return config->intensity;
+}
+
+uint32_t Backlights::getColor()
+{
+#ifdef HARDWARE_IPSTUBE_CLOCK
+  if (controlActive_)
+    return controlledSettings_.color;
+#endif
+  return phaseToColor(config->color_phase);
 }
 
 void Backlights::loop()
 {
+#ifdef HARDWARE_IPSTUBE_CLOCK
+  if (controlActive_)
+  {
+    controlledLoop();
+    return;
+  }
+#endif
   //   enum patterns { dark, test, constant, rainbow, pulse, breath, num_patterns };
   if (off || config->pattern == dark)
   {
@@ -267,3 +337,148 @@ void Backlights::rainbowPattern()
 
 const String Backlights::patterns_str[Backlights::num_patterns] =
     {"Dark", "Test", "Constant", "Rainbow", "Pulse", "Breath"};
+
+#ifdef HARDWARE_IPSTUBE_CLOCK
+
+IPSTubeControl::BacklightEffect Backlights::patternToEffect(patterns pattern) const
+{
+  switch (pattern)
+  {
+  case dark:
+    return IPSTubeControl::BacklightEffect::OFF;
+  case rainbow:
+    return IPSTubeControl::BacklightEffect::RAINBOW;
+  case pulse:
+    return IPSTubeControl::BacklightEffect::PULSE;
+  case breath:
+    return IPSTubeControl::BacklightEffect::BREATH;
+  case test:
+  case constant:
+  case num_patterns:
+    return IPSTubeControl::BacklightEffect::CONSTANT;
+  }
+  return IPSTubeControl::BacklightEffect::CONSTANT;
+}
+
+Backlights::patterns Backlights::effectToPattern(IPSTubeControl::BacklightEffect effect) const
+{
+  switch (effect)
+  {
+  case IPSTubeControl::BacklightEffect::OFF:
+    return dark;
+  case IPSTubeControl::BacklightEffect::RAINBOW:
+    return rainbow;
+  case IPSTubeControl::BacklightEffect::PULSE:
+    return pulse;
+  case IPSTubeControl::BacklightEffect::BREATH:
+    return breath;
+  case IPSTubeControl::BacklightEffect::CONSTANT:
+  case IPSTubeControl::BacklightEffect::COUNT:
+    return constant;
+  }
+  return constant;
+}
+
+void Backlights::markLegacyChange()
+{
+  transitioning_ = false;
+  persistenceSettings_ = controlledSettings_;
+  persistenceRequested_ = true;
+}
+
+void Backlights::loadControlSettings(const IPSTubeControl::BacklightSettings &settings)
+{
+  controlledSettings_ = settings;
+  controlledSettings_.color &= 0xFFFFFFU;
+  if (controlledSettings_.brightness > 7)
+    controlledSettings_.brightness = 7;
+  config->pattern = uint8_t(effectToPattern(controlledSettings_.effect));
+  config->intensity = controlledSettings_.brightness;
+  config->pulse_bpm = controlledSettings_.pulseBpm;
+  config->breath_per_min = controlledSettings_.breathBpm;
+  config->rainbow_sec = controlledSettings_.rainbowSeconds;
+  controlActive_ = true;
+  persistenceSettings_ = controlledSettings_;
+  persistenceRequested_ = false;
+  transitioning_ = false;
+  setBrightness(255);
+}
+
+void Backlights::applyControlSettings(const IPSTubeControl::BacklightSettings &settings,
+                                      uint32_t transitionMs)
+{
+  for (uint8_t pixel = 0; pixel < NUM_BACKLIGHT_LEDS; ++pixel)
+    transitionFrom_[pixel] = lastRendered_[pixel];
+  controlledSettings_ = settings;
+  controlledSettings_.color &= 0xFFFFFFU;
+  controlActive_ = true;
+  transitionStartMs_ = millis();
+  transitionDurationMs_ = transitionMs;
+  transitioning_ = transitionMs > 0;
+  setBrightness(255);
+}
+
+uint32_t Backlights::scaleColor(uint32_t color, uint8_t scale) const
+{
+  const uint8_t red = uint8_t((uint16_t(uint8_t(color >> 16U)) * scale + 127U) / 255U);
+  const uint8_t green = uint8_t((uint16_t(uint8_t(color >> 8U)) * scale + 127U) / 255U);
+  const uint8_t blue = uint8_t((uint16_t(uint8_t(color)) * scale + 127U) / 255U);
+  return (uint32_t(red) << 16U) | (uint32_t(green) << 8U) | blue;
+}
+
+void Backlights::controlledLoop()
+{
+  const uint32_t now = millis();
+  uint8_t level = controlledSettings_.brightness > 7 ? 7 : controlledSettings_.brightness;
+  if (dimming)
+    level = BACKLIGHT_DIMMED_INTENSITY > 7 ? 7 : BACKLIGHT_DIMMED_INTENSITY;
+  const uint8_t maximum = IPSTubeControl::brightnessToHardware(level);
+
+  uint32_t target[NUM_BACKLIGHT_LEDS] = {};
+  if (!off && controlledSettings_.effect != IPSTubeControl::BacklightEffect::OFF)
+  {
+    if (controlledSettings_.effect == IPSTubeControl::BacklightEffect::RAINBOW)
+    {
+      const uint32_t duration = uint32_t(controlledSettings_.rainbowSeconds * 1000.0f);
+      const uint16_t phase = duration == 0 ? 0 : uint16_t((uint64_t(now % duration) * max_phase) / duration);
+      const uint16_t phasePerPixel = (max_phase / NUM_BACKLIGHT_LEDS) / 3;
+      for (uint8_t pixel = 0; pixel < NUM_BACKLIGHT_LEDS; ++pixel)
+        target[pixel] = scaleColor(phaseToColor((phase + pixel * phasePerPixel) % max_phase), maximum);
+    }
+    else
+    {
+      uint8_t effectScale = 255;
+      if (controlledSettings_.effect == IPSTubeControl::BacklightEffect::PULSE)
+      {
+        const float period = 60000.0f / controlledSettings_.pulseBpm;
+        effectScale = uint8_t(1.0f + fabs(sin(2.0f * M_PI * now / period)) * 254.0f);
+      }
+      else if (controlledSettings_.effect == IPSTubeControl::BacklightEffect::BREATH)
+      {
+        const float period = 60000.0f / controlledSettings_.breathBpm;
+        const float value = (exp(sin(2.0f * M_PI * now / period)) - 0.36787944f) * 108.0f;
+        effectScale = value < 1.0f ? 1 : uint8_t(value);
+      }
+      const uint8_t scale = uint8_t((uint16_t(maximum) * effectScale + 127U) / 255U);
+      const uint32_t color = scaleColor(controlledSettings_.color, scale);
+      for (uint8_t pixel = 0; pixel < NUM_BACKLIGHT_LEDS; ++pixel)
+        target[pixel] = color;
+    }
+  }
+
+  const uint32_t elapsed = now - transitionStartMs_;
+  for (uint8_t pixel = 0; pixel < NUM_BACKLIGHT_LEDS; ++pixel)
+  {
+    const uint32_t rendered = transitioning_
+                                  ? IPSTubeControl::lerpColor(transitionFrom_[pixel], target[pixel],
+                                                             elapsed, transitionDurationMs_)
+                                  : target[pixel];
+    lastRendered_[pixel] = rendered;
+    setPixelColor(pixel, rendered);
+  }
+  show();
+  if (transitioning_ && elapsed >= transitionDurationMs_)
+    transitioning_ = false;
+}
+
+#endif

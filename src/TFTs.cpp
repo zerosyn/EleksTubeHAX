@@ -1,6 +1,7 @@
 #include "MQTT_client_ips.h"
 #include "TFTs.h"
 #include "WiFi_WPS.h"
+#include "IPSTubeBmpValidator.h"
 
 void TFTs::begin()
 {
@@ -229,6 +230,45 @@ void TFTs::showDigit(uint8_t digit)
   // else { } //display is disabled, do nothing
 }
 
+bool TFTs::drawImageById(uint8_t screen, uint8_t image)
+{
+  if (!TFTsEnabled || screen >= NUM_DIGITS)
+    return false;
+
+  chip_select.setDigit(screen);
+  bool success = true;
+  if (image == blanked)
+    fillScreen(TFT_BLACK);
+  else
+    success = DrawImage(image);
+
+#ifdef CS_DIRECT_GPIO
+  chip_select.update();
+#endif
+  return success;
+}
+
+bool TFTs::imageExists(uint8_t image)
+{
+  if (image == blanked)
+    return true;
+  char filename[10];
+  snprintf(filename, sizeof(filename), "/%u.bmp", unsigned(image));
+  return FileExists(filename);
+}
+
+bool TFTs::validateImagePath(const char *path)
+{
+#ifndef USE_CLK_FILES
+  const bool valid = LoadImagePathIntoBuffer(path, blanked);
+  InvalidateImageInBuffer();
+  return valid;
+#else
+  (void)path;
+  return false;
+#endif
+}
+
 void TFTs::LoadNextImage()
 {
   if (NextFileRequired != FileInBuffer)
@@ -309,12 +349,18 @@ int8_t TFTs::CountNumberOfClockFaces()
 
 bool TFTs::LoadImageIntoBuffer(uint8_t file_index)
 {
-  uint32_t StartTime = millis();
-
-  fs::File bmpFS;
   // Filenames are no bigger than "255.bmp\0"
   char filename[10];
   sprintf(filename, "/%d.bmp", file_index);
+
+  return LoadImagePathIntoBuffer(filename, file_index);
+}
+
+bool TFTs::LoadImagePathIntoBuffer(const char *filename, uint8_t cache_index)
+{
+  uint32_t StartTime = millis();
+
+  fs::File bmpFS;
 
 #ifdef DEBUG_OUTPUT_IMAGES
   Serial.print("Loading: ");
@@ -329,6 +375,25 @@ bool TFTs::LoadImageIntoBuffer(uint8_t file_index)
     Serial.println(filename);
     return (false);
   }
+
+  uint8_t header[54];
+  if (bmpFS.read(header, sizeof(header)) != sizeof(header))
+  {
+    Serial.println("BMP header is truncated.");
+    bmpFS.close();
+    return false;
+  }
+  IPSTubeControl::BmpInfo bmpInfo = {};
+  const IPSTubeControl::BmpError validation =
+      IPSTubeControl::validateBmpHeader(header, sizeof(header), bmpFS.size(), bmpInfo);
+  if (validation != IPSTubeControl::BmpError::OK)
+  {
+    Serial.print("BMP validation failed: ");
+    Serial.println(IPSTubeControl::bmpErrorName(validation));
+    bmpFS.close();
+    return false;
+  }
+  bmpFS.seek(0);
 
   uint32_t seekOffset, headerSize, paletteSize = 0;
   int16_t w, h, row, col;
@@ -459,7 +524,7 @@ bool TFTs::LoadImageIntoBuffer(uint8_t file_index)
       UnpackedImageBuffer[row + y][col + x] = color;
     } // col
   } // row
-  FileInBuffer = file_index;
+  FileInBuffer = cache_index;
 
   bmpFS.close();
 #ifdef DEBUG_OUTPUT_IMAGES
@@ -608,7 +673,7 @@ bool TFTs::LoadImageIntoBuffer(uint8_t file_index)
 }
 #endif
 
-void TFTs::DrawImage(uint8_t file_index)
+bool TFTs::DrawImage(uint8_t file_index)
 {
 
   uint32_t StartTime = millis();
@@ -623,7 +688,8 @@ void TFTs::DrawImage(uint8_t file_index)
 #ifdef DEBUG_OUTPUT_IMAGES
     Serial.println("Not preloaded; loading now...");
 #endif
-    LoadImageIntoBuffer(file_index);
+    if (!LoadImageIntoBuffer(file_index))
+      return false;
   }
 
   bool oldSwapBytes = getSwapBytes();
@@ -635,6 +701,7 @@ void TFTs::DrawImage(uint8_t file_index)
   Serial.print("img transfer time: ");
   Serial.println(millis() - StartTime);
 #endif
+  return true;
 }
 
 // These read 16- and 32-bit types from the SD card file.

@@ -1,0 +1,60 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "IPSTUBE_URL=http://ipstube.local IPSTUBE_STATUS_SCREEN=5 python3 /absolute/path/to/EleksTubeHAX/tools/codex_ipstube_status.py",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "IPSTUBE_URL=http://ipstube.local IPSTUBE_STATUS_SCREEN=5 python3 /absolute/path/to/EleksTubeHAX/tools/codex_ipstube_status.py",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "IPSTUBE_URL=http://ipstube.local IPSTUBE_STATUS_SCREEN=5 python3 /absolute/path/to/EleksTubeHAX/tools/codex_ipstube_status.py",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "IPSTUBE_URL=http://ipstube.local IPSTUBE_STATUS_SCREEN=5 python3 /absolute/path/to/EleksTubeHAX/tools/codex_ipstube_status.py",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "IPSTUBE_URL=http://ipstube.local IPSTUBE_STATUS_SCREEN=5 python3 /absolute/path/to/EleksTubeHAX/tools/codex_ipstube_status.py",
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  }
+}

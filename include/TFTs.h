@@ -48,6 +48,11 @@ public:
   }
   void showDigit(uint8_t digit);
 
+  // Generic IPSTube image API. screen is physical left-to-right, image 255 blanks.
+  bool drawImageById(uint8_t screen, uint8_t image);
+  bool validateImagePath(const char *path);
+  bool imageExists(uint8_t image);
+
   // Controls the power to all displays
   void enableAllDisplays();
   void disableAllDisplays();
@@ -72,7 +77,8 @@ private:
   bool FileExists(const char *path);
   int8_t CountNumberOfClockFaces();
   bool LoadImageIntoBuffer(uint8_t file_index);
-  void DrawImage(uint8_t file_index);
+  bool LoadImagePathIntoBuffer(const char *path, uint8_t cache_index);
+  bool DrawImage(uint8_t file_index);
   uint16_t read16(fs::File &f);
   uint32_t read32(fs::File &f);
 

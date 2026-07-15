@@ -1,6 +1,6 @@
 # IPSTube HTTP 显示、图片、Codex 状态与氛围灯控制设计
 
-- 状态：已确认，待实现
+- 状态：v1 已实现，待实机验收
 - 日期：2026-07-15
 - 目标硬件：8MB Flash 的 IPSTube H401/H402
 - PlatformIO 环境：`IPSTube`
@@ -627,6 +627,23 @@ IPSTUBE_STATUS_SCREEN=5
 - 用户需要在 Codex `/hooks` 中审核并信任 hook 定义。
 - 用户级 `~/.codex/hooks.json` 适合覆盖所有仓库；项目级 hook 只适合希望跟随该仓库的情况。
 
+可直接从 `tools/codex_ipstube_hooks.example.json` 开始配置：
+
+1. 把示例复制为 `~/.codex/hooks.json`，或将其中各事件合并进已有的 `hooks` 对象。
+2. 把五处 `/absolute/path/to/EleksTubeHAX` 改为本仓库的绝对路径。
+3. 把 `http://ipstube.local` 改为设备实际地址；如状态屏不是最右屏，再改 `IPSTUBE_STATUS_SCREEN`。
+4. 重启或恢复 Codex 任务后执行 `/hooks`，审核并信任这些命令。
+
+不经过 Codex 的手动联调命令：
+
+```bash
+printf '%s' '{"hook_event_name":"UserPromptSubmit"}' \
+  | IPSTUBE_URL=http://ipstube.local IPSTUBE_STATUS_SCREEN=5 \
+    python3 tools/codex_ipstube_status.py
+```
+
+脚本刻意吞掉网络异常且不输出 stdout，因此设备离线时也不会影响 Codex；联调时可另用 `curl` 检查设备是否可达。
+
 ### 11.3 多任务语义
 
 Codex 桌面宠物会聚合多个任务，并按 Needs input、Blocked、Ready、Running 的顺序决定优先显示项。本方案有意简化：
@@ -694,19 +711,19 @@ HTTP v1 假设设备仅位于可信局域网。任何能访问设备 80 端口�
 - MQTT 可以继续编译，但不是本功能依赖。MQTT 与物理菜单的灯光修改必须调用统一 Backlights 状态入口。
 - HTTP 页面只有在 Wi-Fi 已连接后可访问；Wi-Fi 断开时本地时钟、手动屏幕和灯光继续运行。
 
-## 16. 建议的代码改动边界
+## 16. 实际代码改动
 
 新增：
 
-- `include/ExtensionConfig.h`
-- `src/ExtensionConfig.cpp`
-- `include/DisplayController.h`
-- `src/DisplayController.cpp`
-- `include/ImageStore.h`
-- `src/ImageStore.cpp`
-- `include/HttpControlServer.h`
-- `src/HttpControlServer.cpp`
+- `include/IPSTubeControlTypes.h`、`src/IPSTubeControlTypes.cpp`
+- `include/IPSTubeBmpValidator.h`、`src/IPSTubeBmpValidator.cpp`
+- `include/IPSTubeExtensionConfig.h`、`src/IPSTubeExtensionConfig.cpp`
+- `include/IPSTubeDisplayController.h`、`src/IPSTubeDisplayController.cpp`
+- `include/IPSTubeHttpServer.h`、`src/IPSTubeHttpServer.cpp`
 - `tools/codex_ipstube_status.py`：只使用 Python 标准库的主机脚本
+- `tools/codex_ipstube_hooks.example.json`：用户级 hooks 配置模板
+- `scripts/generate_ipstube_assets.py`：可重复生成冒号和四张默认状态图
+- `scripts/test_ipstube_control.sh`、`tests/`：主机侧核心逻辑与 hook 测试
 
 修改：
 
@@ -715,7 +732,26 @@ HTTP v1 假设设备仅位于可信局域网。任何能访问设备 80 端口�
 - `include/Backlights.h`、`src/Backlights.cpp`：直接 RGB、统一状态入口、线性过渡。
 - `data/`：提供 `/0.bmp` 到 `/9.bmp`、`/250.bmp` 到 `/254.bmp` 的默认素材。
 
-不新增通用框架，不把小组件拆成更多单用途抽象。若实现时一个组件只剩几行且没有独立测试价值，可合并到相邻组件。
+实现保持在 IPSTube 条件编译边界内，没有为其他硬件引入 HTTP 显示状态。
+
+### 16.1 首次烧录与后续维护
+
+首次使用本功能必须同时烧录固件和 LittleFS，因为 `0..9`、`250..254` 的默认文件位于 `data/`：
+
+```bash
+pio run -e IPSTube -t upload
+pio run -e IPSTube -t uploadfs
+```
+
+之后修改任意图片只需打开 `http://<设备地址>/`，或调用 `POST /api/images/{id}`，无需重新编译或刷写固件。布局、手动图片和灯光设置按各接口的持久化规则写入 NVS，也不需要重刷。
+
+如需重建仓库内的默认冒号与状态素材：
+
+```bash
+python3 scripts/generate_ipstube_assets.py
+```
+
+该脚本只生成默认占位素材；设备上已经通过 HTTP 上传的自定义图片不受影响。
 
 ## 17. 验证计划
 
@@ -795,3 +831,19 @@ pio run -e IPSTube
 - 仓库 `include/StoredConfig.h`
 - Codex 官方文档：[Hooks](https://learn.chatgpt.com/docs/hooks.md)
 - Codex 官方文档：[Pets](https://learn.chatgpt.com/docs/pets.md)
+
+## 20. 实现验证结果
+
+2026-07-15 的主机侧验证结果：
+
+| 项目 | 结果 |
+| --- | --- |
+| 核心 C++ 单元测试 | 通过；覆盖枚举、布局原子替换、时钟映射、BMP 边界、持久化字段和灯光插值 |
+| Codex hook Python 测试 | 6/6 通过 |
+| `IPSTube` 固件构建 | 通过；RAM 113,252 / 327,680，Flash 1,087,113 / 1,245,184 |
+| IPSTube 应用分区余量 | 158,071 字节，大于 65,536 字节目标 |
+| `EleksTube` 兼容构建 | 通过；证明 IPSTube 条件编译未破坏原硬件环境 |
+| LittleFS 素材 | 85 张 BMP；`data/` 全部文件逻辑大小 1,941,731 字节 |
+| 7,012,352 字节 LittleFS 镜像 | 使用 PlatformIO 对应的 `mklittlefs 1.203.210628` 参数构建成功 |
+
+尚需在真实 H401/H402 上完成第 17.2 到 17.6 节中的硬件验收，重点检查物理左右屏幕编号、BMP 上传掉电恢复、60 秒灯光过渡期间的交互响应，以及本机网络环境中的 Codex hook 时序。
