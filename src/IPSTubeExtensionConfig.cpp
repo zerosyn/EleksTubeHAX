@@ -2,6 +2,8 @@
 
 #ifdef HARDWARE_IPSTUBE_CLOCK
 
+#include <string.h>
+
 using namespace IPSTubeControl;
 
 namespace
@@ -10,6 +12,9 @@ constexpr const char *NAMESPACE = "ipstube_ext";
 constexpr const char *SCHEMA_KEY = "schema";
 constexpr const char *PAYLOAD_KEY = "payload";
 constexpr uint8_t SCHEMA_VERSION = 1;
+constexpr const char *ANIMATION_SCHEMA_KEY = "anim_schema";
+constexpr const char *ANIMATIONS_KEY = "animations";
+constexpr uint8_t ANIMATION_SCHEMA_VERSION = 1;
 }
 
 IPSTubeExtensionConfig ipstubeExtensionConfig;
@@ -21,6 +26,7 @@ void IPSTubeExtensionConfig::setDefaults(const BacklightSettings &legacyBackligh
   {
     config_.roles[screen] = uint8_t(defaultClockRole(screen));
     config_.savedImages[screen] = defaultSavedImage(screen);
+    animations_[screen] = uint8_t(AnimationPreset::OFF);
   }
   config_.effect = uint8_t(legacyBacklight.effect);
   config_.color = legacyBacklight.color & 0xFFFFFFU;
@@ -39,6 +45,32 @@ void IPSTubeExtensionConfig::setDefaults(const BacklightSettings &legacyBackligh
   }
 }
 
+void IPSTubeExtensionConfig::loadAnimations()
+{
+  const uint8_t schema = preferences_.getUChar(ANIMATION_SCHEMA_KEY, 0);
+  const size_t length = preferences_.getBytesLength(ANIMATIONS_KEY);
+  if (schema == 0 && length == 0)
+    return;
+  if (schema != ANIMATION_SCHEMA_VERSION || length != sizeof(animations_))
+  {
+    Serial.println("IPSTube animation config version/length unknown; using defaults.");
+    return;
+  }
+
+  uint8_t loaded[SCREEN_COUNT] = {};
+  if (preferences_.getBytes(ANIMATIONS_KEY, loaded, sizeof(loaded)) != sizeof(loaded))
+    return;
+  for (uint8_t screen = 0; screen < SCREEN_COUNT; ++screen)
+  {
+    if (loaded[screen] >= uint8_t(AnimationPreset::COUNT))
+    {
+      Serial.println("IPSTube animation config invalid; using defaults.");
+      return;
+    }
+  }
+  memcpy(animations_, loaded, sizeof(animations_));
+}
+
 void IPSTubeExtensionConfig::begin(const BacklightSettings &legacyBacklight)
 {
   setDefaults(legacyBacklight);
@@ -47,6 +79,7 @@ void IPSTubeExtensionConfig::begin(const BacklightSettings &legacyBacklight)
     Serial.println("IPSTube extension NVS open failed; using defaults.");
     return;
   }
+  loadAnimations();
 
   const uint8_t schema = preferences_.getUChar(SCHEMA_KEY, 0);
   const size_t length = preferences_.getBytesLength(PAYLOAD_KEY);
@@ -80,6 +113,24 @@ bool IPSTubeExtensionConfig::save(const PersistedConfigV1 &config)
     return false;
   config_ = config;
   loaded_ = true;
+  return true;
+}
+
+bool IPSTubeExtensionConfig::saveAnimations(const uint8_t animations[SCREEN_COUNT])
+{
+  if (animations == nullptr)
+    return false;
+  for (uint8_t screen = 0; screen < SCREEN_COUNT; ++screen)
+  {
+    if (animations[screen] >= uint8_t(AnimationPreset::COUNT))
+      return false;
+  }
+  if (preferences_.putBytes(ANIMATIONS_KEY, animations, sizeof(animations_)) != sizeof(animations_))
+    return false;
+  if (preferences_.getUChar(ANIMATION_SCHEMA_KEY, 0) != ANIMATION_SCHEMA_VERSION &&
+      preferences_.putUChar(ANIMATION_SCHEMA_KEY, ANIMATION_SCHEMA_VERSION) != sizeof(uint8_t))
+    return false;
+  memcpy(animations_, animations, sizeof(animations_));
   return true;
 }
 

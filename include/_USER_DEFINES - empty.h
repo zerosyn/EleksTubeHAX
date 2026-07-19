@@ -18,7 +18,7 @@
 // #define USE_CLK_FILES   // Select between .CLK and .BMP images
 
 // ************* Display Dimming / Night time operation *************
-#define DIMMING                      // Uncomment to enable dimming in the given time period between NIGHT_TIME and DAY_TIME
+// #define DIMMING                   // Uncomment to enable dimming in the given time period between NIGHT_TIME and DAY_TIME
 #define NIGHT_TIME 22                // Dim displays at 10 pm
 #define DAY_TIME 7                   // Full brightness after 7 am
 #define BACKLIGHT_DIMMED_INTENSITY 1 // 0..7

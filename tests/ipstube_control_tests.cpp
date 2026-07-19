@@ -1,4 +1,5 @@
 #include "IPSTubeControlTypes.h"
+#include "IPSTubeAnimations.h"
 #include "IPSTubeBmpValidator.h"
 
 #include <assert.h>
@@ -82,12 +83,13 @@ static void testClockRoles()
   assert(!parseClockRole("UNKNOWN", role));
 
   const ClockRole expected[SCREEN_COUNT] = {
-      ClockRole::H1, ClockRole::H2, ClockRole::COLON,
-      ClockRole::M1, ClockRole::M2, ClockRole::MANUAL};
+      ClockRole::MANUAL, ClockRole::M2, ClockRole::M1,
+      ClockRole::COLON, ClockRole::H2, ClockRole::H1};
   for (uint8_t screen = 0; screen < SCREEN_COUNT; ++screen)
     assert(defaultClockRole(screen) == expected[screen]);
-  assert(defaultSavedImage(5) == STATUS_IDLE_IMAGE);
-  assert(defaultSavedImage(0) == BLANK_IMAGE);
+  assert(defaultSavedImage(0) == STATUS_IDLE_IMAGE);
+  assert(defaultSavedImage(3) == COLON_IMAGE);
+  assert(defaultSavedImage(5) == BLANK_IMAGE);
 }
 
 static void testClockImageMapping()
@@ -110,10 +112,10 @@ static void testDisplayState()
 {
   DisplayState state;
   state.resetDefaults();
-  assert(state.role(0) == ClockRole::H1);
-  assert(state.role(5) == ClockRole::MANUAL);
-  assert(state.savedImage(5) == STATUS_IDLE_IMAGE);
-  assert(state.currentImage(5) == STATUS_IDLE_IMAGE);
+  assert(state.role(0) == ClockRole::MANUAL);
+  assert(state.role(5) == ClockRole::H1);
+  assert(state.savedImage(0) == STATUS_IDLE_IMAGE);
+  assert(state.currentImage(0) == STATUS_IDLE_IMAGE);
 
   const LayoutEntry hoursOnly[] = {
       {0, ClockRole::H1},
@@ -125,12 +127,12 @@ static void testDisplayState()
   for (uint8_t screen = 2; screen < SCREEN_COUNT; ++screen)
     assert(state.role(screen) == ClockRole::MANUAL);
 
-  state.setCurrentImage(5, STATUS_WORKING_IMAGE);
-  assert(state.currentImage(5) == STATUS_WORKING_IMAGE);
-  assert(state.savedImage(5) == STATUS_IDLE_IMAGE);
-  state.setSavedImage(5, STATUS_COMPLETE_IMAGE);
-  assert(state.currentImage(5) == STATUS_WORKING_IMAGE);
-  assert(state.savedImage(5) == STATUS_COMPLETE_IMAGE);
+  state.setCurrentImage(0, STATUS_WORKING_IMAGE);
+  assert(state.currentImage(0) == STATUS_WORKING_IMAGE);
+  assert(state.savedImage(0) == STATUS_IDLE_IMAGE);
+  state.setSavedImage(0, STATUS_COMPLETE_IMAGE);
+  assert(state.currentImage(0) == STATUS_WORKING_IMAGE);
+  assert(state.savedImage(0) == STATUS_COMPLETE_IMAGE);
 
   const LayoutEntry duplicate[] = {
       {0, ClockRole::H1},
@@ -207,6 +209,114 @@ static void testBacklightTypes()
   assert(lerpColor(0x102030, 0x90A0B0, 5, 0) == 0x90A0B0);
 }
 
+static void testAnimationTypes()
+{
+  const char *names[] = {"off", "matrix", "rings", "squares", "swirl"};
+  for (uint8_t index = 0; index < sizeof(names) / sizeof(names[0]); ++index)
+  {
+    AnimationPreset preset = AnimationPreset::OFF;
+    assert(parseAnimationPreset(names[index], preset));
+    assert(uint8_t(preset) == index);
+    assert(strcmp(animationPresetName(preset), names[index]) == 0);
+  }
+  AnimationPreset preset = AnimationPreset::OFF;
+  assert(!parseAnimationPreset("Matrix", preset));
+  assert(!parseAnimationPreset("unknown", preset));
+}
+
+static void testMatrixAnimationRenderer()
+{
+  constexpr uint16_t width = 135;
+  constexpr uint16_t height = 240;
+  std::vector<uint16_t> first(width * height + 2, 0xA55A);
+  std::vector<uint16_t> same(width * height + 2, 0xA55A);
+  MatrixAnimationState stateA = {};
+  MatrixAnimationState stateB = {};
+  resetMatrixAnimation(stateA, 0x12345678U, width, height);
+  resetMatrixAnimation(stateB, 0x12345678U, width, height);
+
+  renderMatrixAnimation(first.data() + 1, width, height, &stateA);
+  renderMatrixAnimation(same.data() + 1, width, height, &stateB);
+  assert(first == same);
+  assert(first.front() == 0xA55A && first.back() == 0xA55A);
+
+  size_t litPixels = 0;
+  for (size_t index = 1; index + 1 < first.size(); ++index)
+  {
+    const uint16_t color = first[index];
+    if (color == 0)
+      continue;
+    ++litPixels;
+    const uint8_t red = uint8_t((color >> 11U) & 0x1FU);
+    const uint8_t green = uint8_t((color >> 5U) & 0x3FU);
+    assert(green > 0);
+    assert(green >= red);
+  }
+  assert(litPixels > 100);
+
+  const std::vector<uint16_t> previous = first;
+  renderMatrixAnimation(first.data() + 1, width, height, &stateA);
+  assert(first != previous);
+}
+
+using GeometricRenderer = void (*)(uint16_t *, uint16_t, uint16_t, void *);
+
+static void testGeometricAnimationRenderer(GeometricRenderer renderer)
+{
+  constexpr uint16_t width = 135;
+  constexpr uint16_t height = 240;
+  constexpr uint16_t guard = 0xA55A;
+  constexpr uint16_t background = 0x0000;
+  std::vector<uint16_t> first(width * height + 2, guard);
+  std::vector<uint16_t> same(width * height + 2, guard);
+  GeometricAnimationState stateA = {};
+  GeometricAnimationState stateB = {};
+  resetGeometricAnimation(stateA);
+  resetGeometricAnimation(stateB);
+
+  renderer(first.data() + 1, width, height, &stateA);
+  renderer(same.data() + 1, width, height, &stateB);
+  assert(first == same);
+  assert(first.front() == guard && first.back() == guard);
+
+  size_t artworkPixels = 0;
+  uint16_t firstArtworkColor = background;
+  bool hasMultipleColors = false;
+  for (size_t index = 1; index + 1 < first.size(); ++index)
+  {
+    if (first[index] == background)
+      continue;
+    ++artworkPixels;
+    if (firstArtworkColor == background)
+      firstArtworkColor = first[index];
+    else if (first[index] != firstArtworkColor)
+      hasMultipleColors = true;
+  }
+  assert(artworkPixels > 300);
+  assert(hasMultipleColors);
+
+  const std::vector<uint16_t> previous = first;
+  renderer(first.data() + 1, width, height, &stateA);
+  assert(first != previous);
+}
+
+static void testGeometricAnimationRenderers()
+{
+  testGeometricAnimationRenderer(renderRingsAnimation);
+  testGeometricAnimationRenderer(renderSquaresAnimation);
+  testGeometricAnimationRenderer(renderSwirlAnimation);
+
+  constexpr uint16_t width = 135;
+  constexpr uint16_t height = 240;
+  std::vector<uint16_t> frame(width * height, 0);
+  GeometricAnimationState state = {};
+  resetGeometricAnimation(state);
+  renderSwirlAnimation(frame.data(), width, height, &state);
+  assert(frame[size_t(height / 2U) * width + width / 2U] == 0x2124U);
+  assert(frame[width / 2U] != 0x2124U);
+  assert(frame[size_t(height - 1U) * width + width / 2U] != 0x2124U);
+}
+
 static void testPersistedConfigValidation()
 {
   PersistedConfigV1 config = {};
@@ -276,6 +386,9 @@ int main()
   testDisplayState();
   testBmpValidation();
   testBacklightTypes();
+  testAnimationTypes();
+  testMatrixAnimationRenderer();
+  testGeometricAnimationRenderers();
   testPersistedConfigValidation();
   testDefaultAssets();
   puts("ipstube_control_tests: PASS");

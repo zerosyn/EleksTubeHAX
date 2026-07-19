@@ -165,9 +165,9 @@ Some clock models have specific functionalities or hardware specials which are o
 
 * Uses a dedicated PlatformIO environment (`IPSTube`) with the `partition_8MB.csv` layout and custom board definition found in `boards/`.
 
-##### 3.2.2.1 One button menu
+##### 3.2.2.1 One button soft power
 
-* The clock has only one button, so there is a special menu mode active for this model.
+* A short press toggles all six displays and the ambient LEDs. The ESP32, Wi-Fi and HTTP server remain running.
 
 ##### 3.2.2.2 Color LED stripe
 
@@ -625,7 +625,7 @@ The legacy `script_build_fs_and_merge.py` has been replaced by `script_build_uni
 
 First, it launches PlatformIO with the `buildfs` target for the active environment (same result as choosing "Build Filesystem Image" in the GUI) so a fresh `littlefs.bin` lands in the environment's build directory.
 
-Second, it parses the currently selected partition CSV to discover the offsets, gathers the core images (bootloader, partitions, app) and the freshly built filesystem image, and then calls `python -m esptool merge-bin` (with a fallback to the legacy `merge_bin` syntax) to emit the unified firmware file.
+Second, it parses the currently selected partition CSV to discover the offsets, gathers the core images (bootloader, partitions, app) and the freshly built filesystem image, and then calls PlatformIO's bundled `tool-esptoolpy` (supporting both `merge-bin` and legacy `merge_bin` syntax) to emit the unified firmware file.
 
 #### 5.5.1.2 Clock face image resizing (`script_prepare_mini_clockfaces.py`)
 
@@ -997,6 +997,169 @@ You need to connect to the same MQTT broker like the clock and then will be able
 
 All MQTT messages from and to the clock are also traced out via the serial interface. So using a serial monitor while using the clock, gives also debug information. Make sure you enable the `DEBUG_OUTPUT_MQTT` before compilation and upload.
 
+### 5.7 IPSTube Codex status integration (macOS)
+
+This integration is **not installed automatically** by cloning the repository or starting Codex. Each Mac needs a one-time manual installation because the files live in the user's global Codex and LaunchAgent directories, outside this repository. After installation, Codex runs the hooks automatically and macOS starts the focus watcher automatically at login.
+
+The current implementation is macOS-only. It uses `fcntl`, `/usr/bin/curl`, `/usr/bin/lsappinfo`, and a user LaunchAgent. Do not install it unchanged on Windows or Linux.
+
+#### 5.7.1 What the integration does
+
+| State | Codex event or condition | Screen 0 | Ambient light | Image fallback |
+| --- | --- | --- | --- | --- |
+| INIT / IDLE | `SessionStart`, or Codex becomes frontmost after DONE | image 251 | rainbow | image 251 |
+| WORK | `UserPromptSubmit` or `PostToolUse` | `matrix` | rainbow | image 252 |
+| WAIT | `PermissionRequest` | `swirl` | orange `#FF8000` pulse | image 253 |
+| DONE | `Stop` | `squares` | green `#00FF00` breath | image 254 |
+
+Animation requests use the image fallback only when the animation API fails. Returning to Codex after DONE changes the display to IDLE within about one second. The focus watcher detects the Codex application (`com.openai.codex`), not an individual Codex task window.
+
+The clock must run an IPSTube firmware build that exposes `/api/display`, `/api/animation`, and `/api/backlight` and includes the `matrix`, `swirl`, and `squares` presets. Build it with:
+
+```bash
+pio run -e IPSTube
+```
+
+The combined 8 MB image is written to `firmware/FW_IPSTube_v1.3.13.bin` and must be flashed at offset `0x0`.
+
+#### 5.7.2 Source files
+
+Keep these repository files as the version-controlled source of truth:
+
+- `tools/codex_ipstube_status.py` — lifecycle hook and focus-watcher logic.
+- `tools/codex_ipstube_hooks.example.json` — global Codex hook definitions.
+- `tools/com.zero.codex-ipstube-focus.plist` — macOS user LaunchAgent.
+
+The installed copies do not depend on the repository after installation.
+
+#### 5.7.3 Agent installation checklist
+
+An agent performing this setup must run as the logged-in macOS user, not as root. It must inspect and preserve any existing `~/.codex/hooks.json`; never replace unrelated hooks.
+
+1. Confirm that the clock is reachable from the Mac.
+
+   ```bash
+   curl -sS --max-time 5 http://ipstube.local/api/config
+   ```
+
+2. Review the per-machine settings before copying files.
+
+   | Setting | Repository default | Notes |
+   | --- | --- | --- |
+   | `IPSTUBE_URL` | `http://ipstube.local` | A stable IP address such as `http://192.168.2.202` can be used if `.local` resolution is unreliable. |
+   | `IPSTUBE_PROXY` | `socks5h://127.0.0.1:3070` | Set it to an empty string when no proxy is required. The proxy must be able to reach the local clock. |
+   | `IPSTUBE_STATUS_SCREEN` | `0` | Valid values are 0 through 5. Screen 0 is the MANUAL status screen in the repository's reversed default layout. |
+
+3. Install the hook script into the global Codex directory.
+
+   Run these commands from the repository root:
+
+   ```bash
+   CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+   mkdir -p "$CODEX_HOME/hooks"
+   install -m 755 tools/codex_ipstube_status.py "$CODEX_HOME/hooks/codex_ipstube_status.py"
+   ```
+
+4. Install or merge the global hook definitions.
+
+   - If `$CODEX_HOME/hooks.json` does not exist, copy `tools/codex_ipstube_hooks.example.json` to it.
+   - If it already exists, merge the five event arrays under the top-level `hooks` object: `SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `PostToolUse`, and `Stop`.
+   - Preserve all unrelated events and handlers.
+   - Do not add the same IPSTube handler twice when repeating the installation.
+
+   The installed command should use the global script, not a path inside this repository:
+
+   ```text
+   /usr/bin/python3 ~/.codex/hooks/codex_ipstube_status.py
+   ```
+
+   When this Mac needs settings different from the repository defaults, prefix every installed hook command with the same environment values. For example, a direct IP connection without a proxy is:
+
+   ```text
+   IPSTUBE_URL=http://192.168.2.202 IPSTUBE_PROXY='' IPSTUBE_STATUS_SCREEN=0 /usr/bin/python3 ~/.codex/hooks/codex_ipstube_status.py
+   ```
+
+5. Install the focus watcher LaunchAgent.
+
+   ```bash
+   CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+   PLIST="$HOME/Library/LaunchAgents/com.zero.codex-ipstube-focus.plist"
+   mkdir -p "$HOME/Library/LaunchAgents"
+   install -m 644 tools/com.zero.codex-ipstube-focus.plist "$PLIST"
+   plutil -replace ProgramArguments.1 -string "$CODEX_HOME/hooks/codex_ipstube_status.py" "$PLIST"
+   plutil -lint "$PLIST"
+   ```
+
+   The repository plist contains `/Users/zero/.codex/...` because launchd does not expand `~` in `ProgramArguments`. The `plutil` command above replaces it with the current user's absolute path.
+
+   If custom network settings were added to the hook commands, add the same settings to the copied plist before loading it:
+
+   ```xml
+   <key>EnvironmentVariables</key>
+   <dict>
+     <key>IPSTUBE_URL</key>
+     <string>http://192.168.2.202</string>
+     <key>IPSTUBE_PROXY</key>
+     <string></string>
+     <key>IPSTUBE_STATUS_SCREEN</key>
+     <string>0</string>
+   </dict>
+   ```
+
+6. Load or reload the LaunchAgent.
+
+   ```bash
+   USER_DOMAIN="gui/$(id -u)"
+   LABEL="com.zero.codex-ipstube-focus"
+   PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+   launchctl bootout "$USER_DOMAIN/$LABEL" 2>/dev/null || true
+   launchctl bootstrap "$USER_DOMAIN" "$PLIST"
+   launchctl kickstart -k "$USER_DOMAIN/$LABEL"
+   launchctl print "$USER_DOMAIN/$LABEL"
+   ```
+
+   A healthy service reports `state = running`. Its diagnostic log is `/tmp/codex-ipstube-focus.log`.
+
+7. Restart Codex and trust the hooks.
+
+   Open `/hooks` in the Codex CLI, review the five new or changed handlers, and select **Trust all and continue**. Codex skips non-managed command hooks until their exact definitions are trusted. If the Desktop app does not expose `/hooks`, run the installed `codex` CLI or the CLI bundled inside the Desktop app, complete the trust flow there, and then restart the Desktop app.
+
+#### 5.7.4 Verification
+
+Verify the script independently before relying on lifecycle events:
+
+```bash
+CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+printf '%s' '{"hook_event_name":"UserPromptSubmit"}' | \
+  /usr/bin/python3 "$CODEX_HOME/hooks/codex_ipstube_status.py"
+curl -sS --max-time 5 http://ipstube.local/api/config
+```
+
+The status screen should report `animation: "matrix"` and the backlight should report `effect: "rainbow"`. To test WAIT, send `PermissionRequest`; it should report `animation: "swirl"`, `effect: "pulse"`, and color `#FF8000`.
+
+Then create a new Codex task and confirm the real lifecycle sequence. If the device does not change:
+
+1. Run `/hooks` and confirm every installed handler is `Active`.
+2. Check `/tmp/codex-ipstube-focus.log`.
+3. Run the script manually with the exact environment values from `hooks.json`.
+4. Query `/api/config` to distinguish a hook failure from a physical screen-mapping problem.
+
+#### 5.7.5 Updating or uninstalling
+
+To update, reinstall `tools/codex_ipstube_status.py` over the global copy and restart the LaunchAgent. Replacing only the script does not change the hook command definition. If `hooks.json` or a command string changes, open `/hooks` and trust the new definition again.
+
+To uninstall:
+
+```bash
+USER_DOMAIN="gui/$(id -u)"
+LABEL="com.zero.codex-ipstube-focus"
+launchctl bootout "$USER_DOMAIN/$LABEL" 2>/dev/null || true
+rm -f "$HOME/Library/LaunchAgents/$LABEL.plist"
+rm -f "${CODEX_HOME:-$HOME/.codex}/hooks/codex_ipstube_status.py"
+```
+
+Finally, remove only the IPSTube handlers from `~/.codex/hooks.json`; preserve all other global hooks.
+
 ## 6\. Known problems/limitations, Notes
 
 ##### 6.1 Precision of the gesture sensor (NovelLife SE)
@@ -1024,17 +1187,11 @@ The defined gestures and there button equivalents are:
 
 * Moving from close by the sensor (coming from the front and putting the finger/hand in 1cm distance over the sensor) to a bit more far away (5-7cm distance) is the "far" gesture.
 
-##### 6.2 One button menu for IPSTube clocks
+##### 6.2 One button soft power for IPSTube clocks
 
-The IPSTube clocks have only one button, so there are some limitations at the moment.
+The IPSTube clock has one rear button. A short press toggles the six displays and ambient LEDs off or on. This is a soft-power action: the ESP32, Wi-Fi and HTTP server remain running, and the off state is not saved across a reboot.
 
-* Short pressing the button brings up the menu.
-
-* Short pressing while in the menu changes the menu scope (next menu point).
-
-* Long pressing (at least 0.5 seconds) changes the value of the currently selected menu scope.
-
-This makes navigating through the menus a bit "unhandy." The values always change "to the right" because the long button press emulates a "right button" press in the menu. This limits the selection of values (e.g., for the absolute color values). The selection loops back to the first value after reaching the last value.
+On boards fitted with transistor Q1 this controls the display ground/power path and reduces heat. Boards without Q1 can only display black while their LCD electronics remain powered, so the temperature reduction is limited.
 
 ##### 6.3 No real display turn-off or dimming for some IPSTube clocks
 

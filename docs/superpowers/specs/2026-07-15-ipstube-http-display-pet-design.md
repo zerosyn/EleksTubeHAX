@@ -202,6 +202,22 @@ HTTP 字符串枚举如下，大小写敏感：
 
 内部诊断效果 `Test` 不开放为 HTTP 枚举，避免远程接口混入硬件测试行为。
 
+### 5.5 屏幕动画 `AnimationPreset`
+
+HTTP 字符串枚举如下，大小写敏感：
+
+| 值 | 含义 |
+| --- | --- |
+| `off` | 停止动画并恢复该屏底层时钟数字或最后一张图片 |
+| `matrix` | 黑底绿色十六进制字符瀑布，亮色字符头部带逐级衰减拖尾 |
+| `rings` | 纯黑底彩色同心断弧，各层以不同速度和方向持续旋转 |
+| `squares` | 纯黑底八层彩色方框按固定角度错开，并依次扩张、收缩形成旋转错觉 |
+| `swirl` | 八色旋涡围绕暗色中心顺时针旋转，约 1.8 秒一圈，按原始方形画面居中裁剪为 135×240 |
+
+这是可扩展预设枚举。EleksTubeHAX 原版固件只有氛围灯动态效果，没有可复用的 LCD 像素动画；TFT_eSPI 目录中的动画仅为上游库示例，因此没有作为产品预设复制进来。
+
+所有预设每帧直接写入现有 135×240 RGB565 解码缓冲并推送到指定屏幕，不读取 LittleFS、不为每屏分配整帧 Sprite。`rings` 使用短粗线段近似断弧，`squares` 使用整数线段连接旋转后的四角；两者只为每屏保存一个帧计数器。`swirl` 把屏幕视为一个边长 240 像素的方形画布中央视口，等比例裁掉左右两侧，不拉伸原始构图；色带边界使用 `θ=C+K/r` 模型，并以约 0.5 KiB 的角度/半径查找表代替逐像素浮点三角运算。目标刷新间隔为 83 ms（约 12 FPS）；多屏同时播放时使用轮询调度，每次主循环最多推送一屏，避免长时间阻塞 HTTP、时钟和按钮处理。
+
 ## 6. 默认状态
 
 首次启动、扩展配置不存在或扩展配置版本未知时，采用：
@@ -285,20 +301,20 @@ HTML、CSS 和 JavaScript 编译进 `PROGMEM`，即使 LittleFS 图片损坏，�
     "screens": 6
   },
   "clock_layout": [
-    {"screen": 0, "clock": "H1"},
-    {"screen": 1, "clock": "H2"},
-    {"screen": 2, "clock": "COLON"},
-    {"screen": 3, "clock": "M1"},
-    {"screen": 4, "clock": "M2"},
-    {"screen": 5, "clock": "MANUAL"}
+    {"screen": 0, "clock": "MANUAL"},
+    {"screen": 1, "clock": "M2"},
+    {"screen": 2, "clock": "M1"},
+    {"screen": 3, "clock": "COLON"},
+    {"screen": 4, "clock": "H2"},
+    {"screen": 5, "clock": "H1"}
   ],
   "screens": [
-    {"screen": 0, "current_image": 1, "saved_image": 255},
-    {"screen": 1, "current_image": 4, "saved_image": 255},
-    {"screen": 2, "current_image": 250, "saved_image": 250},
-    {"screen": 3, "current_image": 0, "saved_image": 255},
-    {"screen": 4, "current_image": 7, "saved_image": 255},
-    {"screen": 5, "current_image": 252, "saved_image": 251}
+    {"screen": 0, "current_image": 252, "saved_image": 251},
+    {"screen": 1, "current_image": 7, "saved_image": 255},
+    {"screen": 2, "current_image": 0, "saved_image": 255},
+    {"screen": 3, "current_image": 250, "saved_image": 250},
+    {"screen": 4, "current_image": 4, "saved_image": 255},
+    {"screen": 5, "current_image": 1, "saved_image": 255}
   ],
   "backlight": {
     "effect": "constant",
@@ -468,7 +484,7 @@ curl -F 'file=@working.bmp;type=image/bmp' http://ipstube.local/api/images/252
 | `pulse_bpm` | integer | 否 | `20..120` | `save:true` 时保存 |
 | `breath_bpm` | integer | 否 | `5..60` | `save:true` 时保存 |
 | `rainbow_sec` | number | 否 | `0.2..10.0` | `save:true` 时保存 |
-| `transition_ms` | integer | 否 | `0..60000`，默认 `0` | 不保存，仅控制本次变化 |
+| `transition_ms` | integer | 否 | `0..60000`，默认 `2000` | 不保存，仅控制本次变化 |
 | `save` | boolean | 否 | 默认 `false` | 决定是否保存最终灯光目标 |
 
 `brightness:0` 保持与现有八档亮度的兼容语义，表示最低档而不是逻辑关闭；完全关闭使用 `effect:"off"`。八档的最大硬件亮度依次为 `1、3、7、15、31、63、127、255`。Pulse 和 Breath 可以在各自周期低点短暂低于该最大值。
@@ -481,7 +497,7 @@ curl -F 'file=@working.bmp;type=image/bmp' http://ipstube.local/api/images/252
   "color": "#2080FF",
   "brightness": 6,
   "breath_bpm": 10,
-  "transition_ms": 800,
+  "transition_ms": 2000,
   "save": true
 }
 ```
@@ -514,6 +530,49 @@ curl -F 'file=@working.bmp;type=image/bmp' http://ipstube.local/api/images/252
 }
 ```
 
+### 8.8 `POST /api/animation`
+
+启动或停止指定屏幕的无限循环像素动画。
+
+请求字段：
+
+| 字段 | 类型 | 必填 | 取值 | 含义 |
+| --- | --- | --- | --- | --- |
+| `screen` | integer | 是 | `0..5` | 物理屏幕编号 |
+| `animation` | string | 是 | `off`、`matrix`、`rings`、`squares`、`swirl` | 动画预设 |
+| `save` | boolean | 否 | 默认 `false` | 是否保存为该屏重启后的动画状态 |
+
+示例：
+
+```json
+{
+  "screen": 0,
+  "animation": "matrix",
+  "save": true
+}
+```
+
+规则：
+
+- 动画是时钟或手动图片之上的运行态覆盖，不改变 `ClockRole` 和 `saved_image`。
+- `animation:"off"` 会立即恢复底层内容；自动角色使用最新时间，手动角色恢复最后成功显示的图片。
+- `/api/display` 成功显示图片后会停止该屏当前运行态动画，但不会改写 `saved_animation`；若需跨重启关闭动画，应调用本接口并使用 `save:true`。
+- 动画运行期间，时钟仍在后台更新最新时间，但不会覆盖动画帧。
+- `save:false` 只改变运行状态；`save:true` 使用独立 NVS 动画记录，不改变已有 V1 配置 payload。
+
+成功响应：
+
+```json
+{
+  "ok": true,
+  "saved": true,
+  "screen": 0,
+  "animation": "matrix"
+}
+```
+
+`GET /api/config` 的 `animation_presets` 返回全部可用预设；每个 `screens` 项新增 `animation` 和 `saved_animation`，分别表示当前运行态和重启持久态。
+
 ## 9. 灯光过渡定义
 
 首版“渐变”定义为整组灯从当前实际输出平滑过渡到新目标，不是用户可编程的逐灯空间渐变。
@@ -525,7 +584,7 @@ curl -F 'file=@working.bmp;type=image/bmp' http://ipstube.local/api/images/252
 3. 按 `elapsed / transition_ms` 对快照帧和目标帧做线性 RGB 插值。
 4. 到达 100% 后直接运行目标效果。
 5. 过渡期间收到新请求时，以当时已渲染的帧为新起点重新开始，不跳回旧目标。
-6. `transition_ms:0` 立即切换。
+6. 不传 `transition_ms` 时使用 2000 ms 线性渐变；`transition_ms:0` 仍可要求立即切换。
 7. 整个过程基于 `millis()`，不得阻塞 HTTP、时钟更新、按钮或 Wi-Fi 维护。
 
 不增加 easing 枚举。线性插值已经覆盖颜色淡变、亮度淡入淡出、关闭和效果切换；后续只有在实际观感不足时才考虑扩展。
@@ -540,6 +599,8 @@ curl -F 'file=@working.bmp;type=image/bmp' http://ipstube.local/api/images/252
 namespace: ipstube_ext
 key: schema   -> uint8，当前为 1
 key: payload  -> PersistedConfigV1 blob
+key: anim_schema -> uint8，当前为 1
+key: animations  -> 六个 AnimationPreset 字节
 ```
 
 版本号只表示持久化数据布局，不是固件版本、HTTP API 版本或用户修改次数。
@@ -572,6 +633,8 @@ NVS 自身已有记录完整性保护，V1 不额外增加 CRC。
 - 灯光中间帧
 - `transition_ms`
 - HTTP 客户端或 Codex 任务信息
+
+动画使用独立的 `anim_schema` 和 `animations`，避免扩大或迁移已经发布的 `PersistedConfigV1`。动画配置缺失时六屏均为 `off`；未知动画版本或非法枚举只让动画回到 `off`，不影响显示布局、灯光、Wi-Fi 或时间配置。
 
 ### 10.3 运行态与持久态分离
 
@@ -800,7 +863,15 @@ pio run -e IPSTube
 5. 过渡中发出新请求，不发生跳回旧颜色。
 6. 过渡期间 HTTP、时钟秒更新和按钮仍响应。
 
-### 17.6 Codex hooks
+### 17.6 屏幕动画
+
+1. 逐一验证 `matrix`、`rings`、`squares`、`swirl` 单屏持续播放和 `off` 恢复底层内容。
+2. 验证网页下拉框与 `GET /api/config.animation_presets` 都列出全部四个枚举。
+3. 验证 `save:true` 跨重启恢复，`save:false` 重启后回到持久状态。
+4. 六屏同时播放并保持 HTTP、时钟秒更新和按钮响应。
+5. 验证彩色断环与旋转方框在 135×240 竖屏中居中且不越界，并验证旋涡采用居中 cover 裁剪而非横向压缩。
+
+### 17.7 Codex hooks
 
 1. SessionStart 显示 idle。
 2. 提交消息后显示 working。
@@ -834,16 +905,16 @@ pio run -e IPSTube
 
 ## 20. 实现验证结果
 
-2026-07-15 的主机侧验证结果：
+2026-07-18 的主机侧验证结果：
 
 | 项目 | 结果 |
 | --- | --- |
-| 核心 C++ 单元测试 | 通过；覆盖枚举、布局原子替换、时钟映射、BMP 边界、持久化字段和灯光插值 |
+| 核心 C++ 单元测试 | 通过；覆盖枚举、布局原子替换、时钟映射、BMP 边界、Matrix/Rings/Squares/Swirl 帧边界、确定性、多色输出、持久化字段和灯光插值 |
 | Codex hook Python 测试 | 6/6 通过 |
-| `IPSTube` 固件构建 | 通过；RAM 113,252 / 327,680，Flash 1,087,113 / 1,245,184 |
-| IPSTube 应用分区余量 | 158,071 字节，大于 65,536 字节目标 |
+| `IPSTube` 固件构建 | 通过；RAM 114,220 / 327,680，Flash 1,100,261 / 1,245,184 |
+| IPSTube 应用分区余量 | 144,923 字节，大于 65,536 字节目标 |
 | `EleksTube` 兼容构建 | 通过；证明 IPSTube 条件编译未破坏原硬件环境 |
 | LittleFS 素材 | 85 张 BMP；`data/` 全部文件逻辑大小 1,941,731 字节 |
 | 7,012,352 字节 LittleFS 镜像 | 使用 PlatformIO 对应的 `mklittlefs 1.203.210628` 参数构建成功 |
 
-尚需在真实 H401/H402 上完成第 17.2 到 17.6 节中的硬件验收，重点检查物理左右屏幕编号、BMP 上传掉电恢复、60 秒灯光过渡期间的交互响应，以及本机网络环境中的 Codex hook 时序。
+尚需在真实 H401/H402 上完成第 17.2 到 17.7 节中的硬件验收，重点检查物理左右屏幕编号、BMP 上传掉电恢复、60 秒灯光过渡期间的交互响应、四种动画的实际刷新流畅度与 Swirl 裁剪构图，以及本机网络环境中的 Codex hook 时序。

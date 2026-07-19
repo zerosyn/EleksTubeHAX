@@ -1,5 +1,5 @@
 # Build a single "full" image (bootloader/partitions + app + FS) for flashing at 0x0.
-# - Cross-platform: uses PlatformIO's Python and `python -m esptool` (no deprecated esptool.py)
+# - Cross-platform: uses PlatformIO's Python and bundled tool-esptoolpy package
 # - Independent of FLASH_EXTRA_IMAGES being mutated by buildfs
 # - Parses the partitions CSV to discover app + FS offsets
 # - Includes SPIFFS/LittleFS image in the merged binary
@@ -19,8 +19,15 @@ platform     = env.PioPlatform()
 BOARD_CFG    = env.BoardConfig()
 PROJECT_DIR  = env.subst("$PROJECT_DIR")
 PYTHON       = env.subst("$PYTHONEXE")
+ESPTOOL_PKG  = platform.get_package_dir("tool-esptoolpy") or ""
+ESPTOOL_PATH = os.path.join(ESPTOOL_PKG, "esptool.py")
+ESPTOOL_CMD  = (
+    [PYTHON, ESPTOOL_PATH]
+    if os.path.isfile(ESPTOOL_PATH)
+    else [PYTHON, "-m", "esptool"]
+)
 
-# --- esptool (module) ---------------------------------------------------------
+# --- esptool ------------------------------------------------------------------
 def _py_out(args):
     """Run a subprocess with the penv Python and return stripped stdout or ''."""
     try:
@@ -30,19 +37,15 @@ def _py_out(args):
         return ""
 
 def get_esptool_version():
-    # Query the *same* Python we'll use to run esptool
-    mod_path = _py_out([PYTHON, "-c", "import esptool; import os; print(getattr(esptool,'__file__',''))"])
-    cli_path = _py_out([PYTHON, "-c", "import shutil; print(shutil.which('esptool') or '')"])
-
-    print(f"[unified] esptool module path: {mod_path or '(unknown)'}")
-    print(f"[unified] esptool CLI path:    {cli_path or '(unknown)'}")
-
-    ver_out = _py_out([PYTHON, "-m", "esptool", "version"])
+    print(f"[unified] esptool command:     {' '.join(ESPTOOL_CMD)}")
+    ver_out = _py_out(ESPTOOL_CMD + ["version"])
     m = re.search(r"v?(\d+\.\d+(?:\.\d+)*)", ver_out or "")
     return m.group(1) if m else "unknown"
 
 print(f"[unified] Using Python:        {PYTHON}")
-print(f"[unified] esptool ver:         {get_esptool_version()}")
+ESPTOOL_VERSION = get_esptool_version()
+ESPTOOL_MAJOR = int(ESPTOOL_VERSION.split(".", 1)[0]) if ESPTOOL_VERSION != "unknown" else None
+print(f"[unified] esptool ver:         {ESPTOOL_VERSION}")
 
 # --- Helpers ------------------------------------------------------------------
 def run(cmd):
@@ -55,8 +58,7 @@ def run(cmd):
         sys.exit(proc.returncode)
 
 def run_esptool(args):
-    # Use the module entrypoint to avoid esptool.py deprecation
-    cmd = [PYTHON, "-m", "esptool"] + [str(x) for x in args]
+    cmd = ESPTOOL_CMD + [str(x) for x in args]
     run(cmd)
 
 def run_esptool_with_fallback(args):
@@ -66,7 +68,7 @@ def run_esptool_with_fallback(args):
     """
     # Try new syntax first (esptool v5.x+)
     try:
-        cmd = [PYTHON, "-m", "esptool"] + [str(x) for x in args]
+        cmd = ESPTOOL_CMD + [str(x) for x in args]
         print("[unified]", " ".join(shlex.quote(x) for x in cmd))
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         print(proc.stdout)
@@ -101,7 +103,7 @@ def run_esptool_with_fallback(args):
         else:
             old_args.append(arg_str)
     
-    cmd = [PYTHON, "-m", "esptool"] + old_args
+    cmd = ESPTOOL_CMD + old_args
     print("[unified] Fallback:", " ".join(shlex.quote(x) for x in cmd))
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     print(proc.stdout)
@@ -230,12 +232,6 @@ def normalize_extra_images(raw):
 # --- Build FS image (spiffs/littlefs) ----------------------------------------
 # IMPORTANT: Signature must match what SCons passes: (target, source, env)
 def pio_run_buildfs(target, source, env):
-    build_dir = env.subst("$BUILD_DIR")
-    # Skip if FS image already exists (e.g. pre-built in CI before the main build step)
-    existing = resolve_fs_image("littlefs", build_dir) or resolve_fs_image("spiffs", build_dir)
-    if existing and os.path.exists(existing):
-        print(f"[unified] FS image already exists, skipping buildfs: {existing}")
-        return
     print("[unified] Building filesystem image (buildfs) for current env…")
     env_name = env.subst("$PIOENV")
     if not env_name:
@@ -285,13 +281,14 @@ def esp32_create_combined_bin(target, source, env):
     for off, f in sections:
         print(f"  - {off} | {f}")
 
+    legacy_syntax = ESPTOOL_MAJOR is not None and ESPTOOL_MAJOR < 5
     args = [
         "--chip", str(chip),
-        "merge-bin",
+        "merge_bin" if legacy_syntax else "merge-bin",
         "-o", str(output_path),
-        "--flash-mode", str(flash_mode),
-        "--flash-freq", str(flash_freq),
-        "--flash-size", str(flash_size),
+        "--flash_mode" if legacy_syntax else "--flash-mode", str(flash_mode),
+        "--flash_freq" if legacy_syntax else "--flash-freq", str(flash_freq),
+        "--flash_size" if legacy_syntax else "--flash-size", str(flash_size),
     ]
     for off, f in sections:
         args += [str(off), str(f)]

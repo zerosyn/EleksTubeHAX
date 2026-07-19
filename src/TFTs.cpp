@@ -248,6 +248,25 @@ bool TFTs::drawImageById(uint8_t screen, uint8_t image)
   return success;
 }
 
+bool TFTs::drawGeneratedFrame(uint8_t screen, FrameRenderer renderer, void *context)
+{
+  if (!TFTsEnabled || screen >= NUM_DIGITS || renderer == nullptr)
+    return false;
+
+  renderer(reinterpret_cast<uint16_t *>(UnpackedImageBuffer), TFT_WIDTH, TFT_HEIGHT, context);
+  InvalidateImageInBuffer();
+  chip_select.setDigit(screen);
+  const bool oldSwapBytes = getSwapBytes();
+  setSwapBytes(true);
+  pushImage(0, 0, TFT_WIDTH, TFT_HEIGHT,
+            reinterpret_cast<uint16_t *>(UnpackedImageBuffer));
+  setSwapBytes(oldSwapBytes);
+#ifdef CS_DIRECT_GPIO
+  chip_select.update();
+#endif
+  return true;
+}
+
 bool TFTs::imageExists(uint8_t image)
 {
   if (image == blanked)

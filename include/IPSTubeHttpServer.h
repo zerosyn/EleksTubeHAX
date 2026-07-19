@@ -32,6 +32,7 @@ private:
   void handleConfig();
   void handleImages();
   void handleDisplay();
+  void handleAnimation();
   void handleClockLayout();
   void handleBacklight();
   void handleUploadData();

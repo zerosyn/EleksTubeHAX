@@ -62,6 +62,16 @@ enum class BacklightEffect : uint8_t
   COUNT
 };
 
+enum class AnimationPreset : uint8_t
+{
+  OFF = 0,
+  MATRIX,
+  RINGS,
+  SQUARES,
+  SWIRL,
+  COUNT
+};
+
 struct BacklightSettings
 {
   BacklightEffect effect;
@@ -114,6 +124,8 @@ uint8_t defaultSavedImage(uint8_t screen);
 uint8_t imageForClockRole(ClockRole role, const ClockDigits &digits);
 const char *backlightEffectName(BacklightEffect effect);
 bool parseBacklightEffect(const char *name, BacklightEffect &effect);
+const char *animationPresetName(AnimationPreset preset);
+bool parseAnimationPreset(const char *name, AnimationPreset &preset);
 uint8_t brightnessToHardware(uint8_t brightness);
 uint32_t lerpColor(uint32_t from, uint32_t to, uint32_t elapsed, uint32_t duration);
 bool validatePersistedConfig(const PersistedConfigV1 &config);

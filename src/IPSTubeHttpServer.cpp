@@ -22,6 +22,7 @@ extern char UniqueDeviceName[32];
 namespace
 {
 constexpr size_t MAX_IMAGE_BYTES = 102400;
+constexpr uint32_t DEFAULT_BACKLIGHT_TRANSITION_MS = 2000;
 
 const char MANAGEMENT_PAGE[] PROGMEM = R"HTML(<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -29,20 +30,25 @@ const char MANAGEMENT_PAGE[] PROGMEM = R"HTML(<!doctype html>
 body{font:15px system-ui;margin:auto;max-width:900px;padding:18px;background:#111;color:#eee}fieldset{margin:14px 0;border:1px solid #555}label{display:inline-block;margin:5px}input,select,button,textarea{font:inherit;margin:3px;padding:6px}textarea{width:95%;height:95px}pre{white-space:pre-wrap;background:#222;padding:10px}.ok{color:#8f8}.err{color:#f88}
 </style></head><body><h1>IPSTube 控制台</h1><p id="msg"></p>
 <fieldset><legend>屏幕</legend><label>screen <select id="screen"></select></label><label>image <select id="image"></select></label><label><input id="displaySave" type="checkbox">保存</label><button onclick="displayImage()">显示</button></fieldset>
-<fieldset><legend>时钟布局（整体替换）</legend><textarea id="layout">[{"screen":0,"clock":"H1"},{"screen":1,"clock":"H2"},{"screen":2,"clock":"COLON"},{"screen":3,"clock":"M1"},{"screen":4,"clock":"M2"}]</textarea><br><button onclick="saveLayout()">保存布局</button></fieldset>
+<fieldset><legend>时钟布局（整体替换）</legend><textarea id="layout">[{"screen":1,"clock":"M2"},{"screen":2,"clock":"M1"},{"screen":3,"clock":"COLON"},{"screen":4,"clock":"H2"},{"screen":5,"clock":"H1"}]</textarea><br><button onclick="saveLayout()">保存布局</button></fieldset>
 <fieldset><legend>上传 BMP</legend><label>ID <input id="uploadId" type="number" min="0" max="254" value="252"></label><input id="file" type="file" accept=".bmp,image/bmp"><button onclick="uploadImage()">上传并替换</button></fieldset>
-<fieldset><legend>氛围灯</legend><label>效果 <select id="effect"><option>off</option><option>constant</option><option>rainbow</option><option>pulse</option><option>breath</option></select></label><label>颜色 <input id="color" type="color" value="#ff8000"></label><label>亮度 <input id="brightness" type="number" min="0" max="7" value="5"></label><label>Pulse BPM <input id="pulse" type="number" min="20" max="120" value="60"></label><label>Breath BPM <input id="breath" type="number" min="5" max="60" value="20"></label><label>Rainbow 秒 <input id="rainbow" type="number" min="0.2" max="10" step="0.1" value="8"></label><label>渐变 ms <input id="transition" type="number" min="0" max="60000" value="800"></label><label><input id="lightSave" type="checkbox">保存</label><button onclick="setLight()">应用</button></fieldset>
-<fieldset><legend>当前配置</legend><button onclick="loadAll()">刷新</button><pre id="config"></pre></fieldset>
+<fieldset><legend>屏幕像素动画</legend><label>screen <select id="animScreen"></select></label><label>预设 <select id="animation"><option>off</option><option>matrix</option><option>rings</option><option>squares</option><option>swirl</option></select></label><label><input id="animationSave" type="checkbox">保存</label><button onclick="setAnimation()">应用</button></fieldset>
+<fieldset><legend>氛围灯</legend><label>效果 <select id="effect"><option>off</option><option>constant</option><option>rainbow</option><option>pulse</option><option>breath</option></select></label><label>颜色 <input id="color" type="color" value="#ff8000"></label><label>亮度 <input id="brightness" type="number" min="0" max="7" value="5"></label><label>Pulse BPM <input id="pulse" type="number" min="20" max="120" value="60"></label><label>Breath BPM <input id="breath" type="number" min="5" max="60" value="20"></label><label>Rainbow 秒 <input id="rainbow" type="number" min="0.2" max="10" step="0.1" value="8"></label><label>渐变 ms <input id="transition" type="number" min="0" max="60000" value="2000"></label><label><input id="lightSave" type="checkbox">保存</label><button onclick="setLight()">应用</button></fieldset>
+<details><summary>当前配置</summary><fieldset><button onclick="refreshConfig()">刷新</button><pre id="config"></pre></fieldset></details>
 <script>
-const $=id=>document.getElementById(id);for(let i=0;i<6;i++)$('screen').add(new Option(i,i));
+const $=id=>document.getElementById(id);for(let i=0;i<6;i++){ $('screen').add(new Option(i,i));$('animScreen').add(new Option(i,i)) }
 function message(text,ok=true){$('msg').textContent=text;$('msg').className=ok?'ok':'err'}
 async function jsonRequest(url,method,body){const r=await fetch(url,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json();if(!r.ok)throw Error(j.error?.message||r.statusText);return j}
-async function loadAll(){try{const [c,i]=await Promise.all([fetch('/api/config').then(r=>r.json()),fetch('/api/images').then(r=>r.json())]);$('config').textContent=JSON.stringify(c,null,2);$('layout').value=JSON.stringify(c.clock_layout,null,2);$('image').innerHTML='';for(const x of i.images)$('image').add(new Option(`${x.id} ${x.name} ${x.exists?'':'(missing)'}`,x.id));const b=c.backlight;$('effect').value=b.effect;$('color').value=b.color;$('brightness').value=b.brightness;$('pulse').value=b.pulse_bpm;$('breath').value=b.breath_bpm;$('rainbow').value=b.rainbow_sec;message('已刷新')}catch(e){message(e.message,false)}}
-async function displayImage(){try{await jsonRequest('/api/display','POST',{screen:+$('screen').value,image:+$('image').value,save:$('displaySave').checked});message('屏幕已更新');loadAll()}catch(e){message(e.message,false)}}
-async function saveLayout(){try{await jsonRequest('/api/clock-layout','PUT',JSON.parse($('layout').value));message('布局已保存');loadAll()}catch(e){message(e.message,false)}}
-async function uploadImage(){try{const f=$('file').files[0];if(!f)throw Error('请选择 BMP');const form=new FormData();form.append('file',f);const r=await fetch('/api/images/'+$('uploadId').value,{method:'POST',body:form});const j=await r.json();if(!r.ok)throw Error(j.error?.message||r.statusText);message('图片已替换');loadAll()}catch(e){message(e.message,false)}}
-async function setLight(){try{await jsonRequest('/api/backlight','POST',{effect:$('effect').value,color:$('color').value.toUpperCase(),brightness:+$('brightness').value,pulse_bpm:+$('pulse').value,breath_bpm:+$('breath').value,rainbow_sec:+$('rainbow').value,transition_ms:+$('transition').value,save:$('lightSave').checked});message('灯光已更新');loadAll()}catch(e){message(e.message,false)}}
-loadAll();</script></body></html>)HTML";
+async function loadConfig(){const c=await fetch('/api/config').then(r=>r.json());$('config').textContent=JSON.stringify(c,null,2);$('layout').value=JSON.stringify(c.clock_layout,null,2);const b=c.backlight;$('effect').value=b.effect;$('color').value=b.color;$('brightness').value=b.brightness;$('pulse').value=b.pulse_bpm;$('breath').value=b.breath_bpm;$('rainbow').value=b.rainbow_sec}
+async function loadImages(){const i=await fetch('/api/images').then(r=>r.json());$('image').innerHTML='';for(const x of i.images)$('image').add(new Option(`${x.id} ${x.name} ${x.exists?'':'(missing)'}`,x.id))}
+async function refreshConfig(){try{await loadConfig();message('已刷新')}catch(e){message(e.message,false)}}
+async function refreshImages(){try{await loadImages()}catch(e){message(e.message,false)}}
+async function displayImage(){try{await jsonRequest('/api/display','POST',{screen:+$('screen').value,image:+$('image').value,save:$('displaySave').checked});message('屏幕已更新')}catch(e){message(e.message,false)}}
+async function saveLayout(){try{await jsonRequest('/api/clock-layout','PUT',JSON.parse($('layout').value));message('布局已保存')}catch(e){message(e.message,false)}}
+async function uploadImage(){try{const f=$('file').files[0];if(!f)throw Error('请选择 BMP');const form=new FormData();form.append('file',f);const r=await fetch('/api/images/'+$('uploadId').value,{method:'POST',body:form});const j=await r.json();if(!r.ok)throw Error(j.error?.message||r.statusText);message('图片已替换');refreshImages()}catch(e){message(e.message,false)}}
+async function setAnimation(){try{await jsonRequest('/api/animation','POST',{screen:+$('animScreen').value,animation:$('animation').value,save:$('animationSave').checked});message('动画已更新')}catch(e){message(e.message,false)}}
+async function setLight(){try{await jsonRequest('/api/backlight','POST',{effect:$('effect').value,color:$('color').value.toUpperCase(),brightness:+$('brightness').value,pulse_bpm:+$('pulse').value,breath_bpm:+$('breath').value,rainbow_sec:+$('rainbow').value,transition_ms:+$('transition').value,save:$('lightSave').checked});message('灯光已更新')}catch(e){message(e.message,false)}}
+refreshImages();</script></body></html>)HTML";
 
 ClockDigits currentClockDigits()
 {
@@ -117,6 +123,7 @@ void IPSTubeHttpServer::begin()
   server_.on("/api/config", HTTP_GET, [this]() { handleConfig(); });
   server_.on("/api/images", HTTP_GET, [this]() { handleImages(); });
   server_.on("/api/display", HTTP_POST, [this]() { handleDisplay(); });
+  server_.on("/api/animation", HTTP_POST, [this]() { handleAnimation(); });
   server_.on("/api/clock-layout", HTTP_PUT, [this]() { handleClockLayout(); });
   server_.on("/api/backlight", HTTP_POST, [this]() { handleBacklight(); });
   server_.on(UriBraces("/api/images/{}"), HTTP_POST,
@@ -159,6 +166,10 @@ void IPSTubeHttpServer::handleConfig()
   device["hardware"] = "IPSTube H401/H402";
   device["screens"] = SCREEN_COUNT;
 
+  JsonArray animationPresets = document["animation_presets"].to<JsonArray>();
+  for (uint8_t preset = 0; preset < uint8_t(AnimationPreset::COUNT); ++preset)
+    animationPresets.add(animationPresetName(AnimationPreset(preset)));
+
   JsonArray layout = document["clock_layout"].to<JsonArray>();
   JsonArray screens = document["screens"].to<JsonArray>();
   const DisplayState &state = ipstubeDisplay.state();
@@ -171,6 +182,9 @@ void IPSTubeHttpServer::handleConfig()
     display["screen"] = screen;
     display["current_image"] = state.currentImage(screen);
     display["saved_image"] = state.savedImage(screen);
+    display["animation"] = animationPresetName(ipstubeDisplay.animation(screen));
+    display["saved_animation"] = animationPresetName(
+        AnimationPreset(ipstubeExtensionConfig.getSavedAnimations()[screen]));
   }
 
   const BacklightSettings &light = backlights.getControlSettings();
@@ -298,7 +312,63 @@ void IPSTubeHttpServer::handleDisplay()
     sendError(409, "IMAGE_DECODE_FAILED", "image could not be drawn", "image");
     return;
   }
+  ipstubeDisplay.clearAnimation(uint8_t(screen));
   server_.send(200, "application/json", "{\"ok\":true}");
+}
+
+void IPSTubeHttpServer::handleAnimation()
+{
+  JsonDocument document;
+  if (deserializeJson(document, server_.arg("plain")) || !document.is<JsonObject>())
+  {
+    sendError(400, "INVALID_JSON", "request body must be a JSON object");
+    return;
+  }
+  JsonObjectConst object = document.as<JsonObjectConst>();
+  static const char *const allowed[] = {"screen", "animation", "save"};
+  if (!objectHasOnly(object, allowed, 3) || !object["screen"].is<int>() ||
+      !object["animation"].is<const char *>() ||
+      (objectHasKey(object, "save") && !object["save"].is<bool>()))
+  {
+    sendError(400, "INVALID_FIELD", "screen, animation or save has an invalid type");
+    return;
+  }
+
+  const int screen = object["screen"].as<int>();
+  AnimationPreset preset;
+  if (screen < 0 || screen >= SCREEN_COUNT)
+  {
+    sendError(400, "INVALID_FIELD", "screen must be between 0 and 5", "screen");
+    return;
+  }
+  if (!parseAnimationPreset(object["animation"].as<const char *>(), preset))
+  {
+    sendError(400, "INVALID_FIELD", "unknown animation preset", "animation");
+    return;
+  }
+
+  const bool save = object["save"] | false;
+  if (save)
+  {
+    uint8_t animations[SCREEN_COUNT];
+    memcpy(animations, ipstubeExtensionConfig.getSavedAnimations(), sizeof(animations));
+    animations[screen] = uint8_t(preset);
+    if (!ipstubeExtensionConfig.saveAnimations(animations))
+    {
+      sendError(500, "PERSISTENCE_ERROR", "failed to save animation state");
+      return;
+    }
+  }
+
+  ipstubeDisplay.setAnimation(uint8_t(screen), preset, true);
+  JsonDocument response;
+  response["ok"] = true;
+  response["saved"] = save;
+  response["screen"] = screen;
+  response["animation"] = animationPresetName(preset);
+  String output;
+  serializeJson(response, output);
+  server_.send(200, "application/json", output);
 }
 
 void IPSTubeHttpServer::handleClockLayout()
@@ -460,7 +530,7 @@ void IPSTubeHttpServer::handleBacklight()
     next.rainbowSeconds = object["rainbow_sec"].as<float>();
   }
 
-  uint32_t transitionMs = 0;
+  uint32_t transitionMs = DEFAULT_BACKLIGHT_TRANSITION_MS;
   if (objectHasKey(object, "transition_ms"))
   {
     if (!object["transition_ms"].is<int>() || object["transition_ms"].as<int>() < 0 ||

@@ -50,6 +50,9 @@ public:
 
   // Generic IPSTube image API. screen is physical left-to-right, image 255 blanks.
   bool drawImageById(uint8_t screen, uint8_t image);
+  using FrameRenderer = void (*)(uint16_t *pixels, uint16_t width,
+                                 uint16_t height, void *context);
+  bool drawGeneratedFrame(uint8_t screen, FrameRenderer renderer, void *context);
   bool validateImagePath(const char *path);
   bool imageExists(uint8_t image);
 

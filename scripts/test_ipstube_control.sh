@@ -11,6 +11,7 @@ ${CXX:-c++} \
   -Iinclude \
   tests/ipstube_control_tests.cpp \
   src/IPSTubeControlTypes.cpp \
+  src/IPSTubeAnimations.cpp \
   src/IPSTubeBmpValidator.cpp \
   -o .pio/test-native/ipstube_control_tests
 

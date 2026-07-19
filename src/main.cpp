@@ -295,6 +295,7 @@ void setup()
   ipstubeDisplay.begin(tfts);
   ipstubeDisplay.loadPersistent(ipstubeExtensionConfig.get().roles,
                                 ipstubeExtensionConfig.get().savedImages);
+  ipstubeDisplay.loadPersistentAnimations(ipstubeExtensionConfig.getSavedAnimations());
 #endif
   tfts.fillScreen(TFT_BLACK);
 
@@ -426,6 +427,7 @@ void loop()
   WifiReconnect(); // If not connected to WiFi, attempt to reconnect
 #ifdef HARDWARE_IPSTUBE_CLOCK
   ipstubeHttpServer.loop();
+  ipstubeDisplay.loop(millis_at_top);
 #endif
 
 #if defined(MQTT_PLAIN_ENABLED) || defined(MQTT_HOME_ASSISTANT)
@@ -682,7 +684,38 @@ void loop()
   }
 #endif // ONE_BUTTON_ONLY_MENU
 
+#if defined(HARDWARE_IPSTUBE_CLOCK) && defined(ONE_BUTTON_ONLY_MENU)
+  // The IPSTube has only one physical button. Use a short press as a useful
+  // soft-power toggle instead of opening the one-button menu on screen 0.
+  if (buttons.mode.isUpEdge() && menu.getState() == Menu::idle)
+  {
+    if (tfts.isEnabled())
+    {
+      tfts.chip_select.setAll();
+      tfts.fillScreen(TFT_BLACK); // Also simulates power-off on boards without Q1
+      tfts.disableAllDisplays();
+      backlights.PowerOff();
+    }
+    else
+    {
+      tfts.enableAllDisplays();
+      for (uint8_t screen = 0; screen < IPSTubeControl::SCREEN_COUNT; ++screen)
+      {
+        if (!ipstubeDisplay.isAnimating(screen) &&
+            ipstubeDisplay.state().role(screen) == IPSTubeControl::ClockRole::MANUAL)
+          ipstubeDisplay.showImage(screen, ipstubeDisplay.state().currentImage(screen));
+      }
+      updateClockDisplay(TFTs::force);
+      backlights.PowerOn();
+    }
+  }
+  else
+  {
+    menu.loop(buttons); // Preserve non-button menu states such as WPS setup
+  }
+#else
   menu.loop(buttons); // Must be called after buttons.loop()
+#endif
 
 #ifdef CAPACITIVE_TOUCH_BUTTONS
   // D-Esign: LEFT long press while idle -> toggle display and backlight power.

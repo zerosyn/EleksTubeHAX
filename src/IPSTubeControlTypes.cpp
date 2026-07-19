@@ -9,6 +9,8 @@ static const char *const CLOCK_ROLE_NAMES[] = {
     "MANUAL", "H1", "H2", "M1", "M2", "S1", "S2", "COLON"};
 static const char *const BACKLIGHT_EFFECT_NAMES[] = {
     "off", "constant", "rainbow", "pulse", "breath"};
+static const char *const ANIMATION_PRESET_NAMES[] = {
+    "off", "matrix", "rings", "squares", "swirl"};
 
 void imageName(uint8_t image, char *buffer, size_t bufferSize)
 {
@@ -66,16 +68,16 @@ bool parseClockRole(const char *name, ClockRole &role)
 ClockRole defaultClockRole(uint8_t screen)
 {
   static const ClockRole DEFAULT_ROLES[SCREEN_COUNT] = {
-      ClockRole::H1, ClockRole::H2, ClockRole::COLON,
-      ClockRole::M1, ClockRole::M2, ClockRole::MANUAL};
+      ClockRole::MANUAL, ClockRole::M2, ClockRole::M1,
+      ClockRole::COLON, ClockRole::H2, ClockRole::H1};
   return screen < SCREEN_COUNT ? DEFAULT_ROLES[screen] : ClockRole::MANUAL;
 }
 
 uint8_t defaultSavedImage(uint8_t screen)
 {
-  if (screen == 2)
+  if (screen == 3)
     return COLON_IMAGE;
-  if (screen == 5)
+  if (screen == 0)
     return STATUS_IDLE_IMAGE;
   return BLANK_IMAGE;
 }
@@ -183,6 +185,27 @@ bool parseBacklightEffect(const char *name, BacklightEffect &effect)
     if (strcmp(name, BACKLIGHT_EFFECT_NAMES[index]) == 0)
     {
       effect = BacklightEffect(index);
+      return true;
+    }
+  }
+  return false;
+}
+
+const char *animationPresetName(AnimationPreset preset)
+{
+  const uint8_t index = uint8_t(preset);
+  return index < uint8_t(AnimationPreset::COUNT) ? ANIMATION_PRESET_NAMES[index] : "unknown";
+}
+
+bool parseAnimationPreset(const char *name, AnimationPreset &preset)
+{
+  if (name == nullptr)
+    return false;
+  for (uint8_t index = 0; index < uint8_t(AnimationPreset::COUNT); ++index)
+  {
+    if (strcmp(name, ANIMATION_PRESET_NAMES[index]) == 0)
+    {
+      preset = AnimationPreset(index);
       return true;
     }
   }
