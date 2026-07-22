@@ -1007,12 +1007,16 @@ The current implementation is macOS-only. It uses `fcntl`, `/usr/bin/curl`, `/us
 
 | State | Codex event or condition | Screen 0 | Ambient light | Image fallback |
 | --- | --- | --- | --- | --- |
-| INIT / IDLE | `SessionStart`, or Codex becomes frontmost after DONE | image 251 | rainbow | image 251 |
+| INIT / IDLE | `SessionStart`, or Codex becomes frontmost after DONE | dynamic image 249 | rainbow | image 251 |
 | WORK | `UserPromptSubmit` or `PostToolUse` | `matrix` | rainbow | image 252 |
 | WAIT | `PermissionRequest` | `swirl` | orange `#FF8000` pulse | image 253 |
 | DONE | `Stop` | `squares` | green `#00FF00` breath | image 254 |
 
 Animation requests use the image fallback only when the animation API fails. Returning to Codex after DONE changes the display to IDLE within about one second. The focus watcher detects the Codex application (`com.openai.codex`), not an individual Codex task window.
+
+The dynamic IDLE image is generated on the Mac from `data/251.bmp`. It moves the black-hole artwork upward, removes the `IDLE` label, and adds a rounded weekly-allowance progress bar plus a line such as `98% 07-29`. The percentage is the remaining weekly Codex allowance and the date is its local reset date. The watcher refreshes the data every five minutes only while the integration is in IDLE state, and uploads image 249 only when its BMP content changes. If Codex usage lookup, rendering, or upload fails, image 251 remains the offline fallback.
+
+The watcher reads structured data from the local Codex app-server method `account/rateLimits/read` and selects the window whose duration is exactly 10,080 minutes. It does not scrape `/usage` output or call a private ChatGPT HTTP endpoint. The renderer uses only the Python standard library.
 
 The clock must run an IPSTube firmware build that exposes `/api/display`, `/api/animation`, and `/api/backlight` and includes the `matrix`, `swirl`, and `squares` presets. Build it with:
 
@@ -1029,6 +1033,7 @@ Keep these repository files as the version-controlled source of truth:
 - `tools/codex_ipstube_status.py` — lifecycle hook and focus-watcher logic.
 - `tools/codex_ipstube_hooks.example.json` — global Codex hook definitions.
 - `tools/com.zero.codex-ipstube-focus.plist` — macOS user LaunchAgent.
+- `data/251.bmp` — source artwork copied beside the installed hook as its IDLE template.
 
 The installed copies do not depend on the repository after installation.
 
@@ -1049,6 +1054,9 @@ An agent performing this setup must run as the logged-in macOS user, not as root
    | `IPSTUBE_URL` | `http://ipstube.local` | A stable IP address such as `http://192.168.2.202` can be used if `.local` resolution is unreliable. |
    | `IPSTUBE_PROXY` | `socks5h://127.0.0.1:3070` | Set it to an empty string when no proxy is required. The proxy must be able to reach the local clock. |
    | `IPSTUBE_STATUS_SCREEN` | `0` | Valid values are 0 through 5. Screen 0 is the MANUAL status screen in the repository's reversed default layout. |
+   | `IPSTUBE_IDLE_REFRESH_SECONDS` | `300` | Usage refresh interval while IDLE; values below 60 seconds are clamped to 60. |
+   | `CODEX_APP_SERVER` | Desktop-bundled Codex, then PATH fallback | Optional absolute path to a compatible `codex` executable. |
+   | `IPSTUBE_IDLE_TEMPLATE` | Template beside the installed hook | Optional absolute path to another uncompressed 135x240 8-bit BMP. |
 
 3. Install the hook script into the global Codex directory.
 
@@ -1058,6 +1066,7 @@ An agent performing this setup must run as the logged-in macOS user, not as root
    CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
    mkdir -p "$CODEX_HOME/hooks"
    install -m 755 tools/codex_ipstube_status.py "$CODEX_HOME/hooks/codex_ipstube_status.py"
+   install -m 644 data/251.bmp "$CODEX_HOME/hooks/codex_ipstube_idle_template.bmp"
    ```
 
 4. Install or merge the global hook definitions.
@@ -1137,6 +1146,16 @@ curl -sS --max-time 5 http://ipstube.local/api/config
 
 The status screen should report `animation: "matrix"` and the backlight should report `effect: "rainbow"`. To test WAIT, send `PermissionRequest`; it should report `animation: "swirl"`, `effect: "pulse"`, and color `#FF8000`.
 
+Test the dynamic IDLE image separately:
+
+```bash
+CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+/usr/bin/python3 "$CODEX_HOME/hooks/codex_ipstube_status.py" --refresh-idle
+curl -sS --max-time 5 http://ipstube.local/api/config
+```
+
+On success, screen 0 reports image 249 and displays the rounded remaining-usage bar and the percentage/reset-date line. If it reports image 251 instead, check the LaunchAgent log, confirm the template was installed, and verify that the Desktop-bundled `codex app-server` starts under the logged-in user.
+
 Then create a new Codex task and confirm the real lifecycle sequence. If the device does not change:
 
 1. Run `/hooks` and confirm every installed handler is `Active`.
@@ -1146,7 +1165,7 @@ Then create a new Codex task and confirm the real lifecycle sequence. If the dev
 
 #### 5.7.5 Updating or uninstalling
 
-To update, reinstall `tools/codex_ipstube_status.py` over the global copy and restart the LaunchAgent. Replacing only the script does not change the hook command definition. If `hooks.json` or a command string changes, open `/hooks` and trust the new definition again.
+To update, reinstall both `tools/codex_ipstube_status.py` and `data/251.bmp` over their global copies and restart the LaunchAgent. Replacing only the script does not change the hook command definition. If `hooks.json` or a command string changes, open `/hooks` and trust the new definition again.
 
 To uninstall:
 
@@ -1156,6 +1175,7 @@ LABEL="com.zero.codex-ipstube-focus"
 launchctl bootout "$USER_DOMAIN/$LABEL" 2>/dev/null || true
 rm -f "$HOME/Library/LaunchAgents/$LABEL.plist"
 rm -f "${CODEX_HOME:-$HOME/.codex}/hooks/codex_ipstube_status.py"
+rm -f "${CODEX_HOME:-$HOME/.codex}/hooks/codex_ipstube_idle_template.bmp"
 ```
 
 Finally, remove only the IPSTube handlers from `~/.codex/hooks.json`; preserve all other global hooks.
