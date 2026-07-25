@@ -30,6 +30,8 @@ CODEX_BUNDLE_ID = "com.openai.codex"
 FOCUS_MARKER = "/tmp/codex-ipstube-done"
 FOCUS_LOCK = "/tmp/codex-ipstube-focus.lock"
 STATE_FILE = "/tmp/codex-ipstube-state.json"
+CODEX_INSTANCE_FILE = "/tmp/codex-ipstube-codex-instance"
+IDLE_REFRESH_MARKER = "/tmp/codex-ipstube-refresh-idle"
 IDLE_BMP = "/tmp/codex-ipstube-idle.bmp"
 IDLE_HASH = "/tmp/codex-ipstube-idle.sha256"
 DYNAMIC_IDLE_IMAGE = 249
@@ -213,6 +215,23 @@ def _animation_for_event(event_name):
 def _clear_focus_marker():
     try:
         os.unlink(FOCUS_MARKER)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def _request_idle_refresh():
+    try:
+        with open(IDLE_REFRESH_MARKER, "w", encoding="ascii") as handle:
+            handle.write(str(time.time()))
+    except OSError:
+        pass
+
+
+def _clear_idle_refresh_request():
+    try:
+        os.unlink(IDLE_REFRESH_MARKER)
     except FileNotFoundError:
         pass
     except OSError:
@@ -583,6 +602,8 @@ def run(hook_input):
     def update_status():
         _write_state(EVENT_STATES[event_name])
         _clear_focus_marker()
+        if event_name == "SessionStart":
+            _request_idle_refresh()
         animation = _animation_for_event(event_name)
         if animation is not None:
             if not _start_animation(animation):
@@ -623,6 +644,70 @@ def _frontmost_bundle_id():
         return ""
 
 
+def _codex_application_instance():
+    executable_paths = {
+        "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+        "/Applications/Codex.app/Contents/MacOS/Codex",
+    }
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-axo", "pid=,comm="],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                fields = line.strip().split(None, 1)
+                if len(fields) == 2 and fields[0].isdigit() and fields[1] in executable_paths:
+                    return "pid:" + fields[0]
+    except Exception:
+        pass
+
+    try:
+        result = subprocess.run(
+            ["/usr/bin/lsappinfo", "find", "bundleid=" + CODEX_BUNDLE_ID],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+        instance = result.stdout.strip()
+        return instance if result.returncode == 0 and "NULL" not in instance else ""
+    except Exception:
+        return ""
+
+
+def _read_codex_instance():
+    try:
+        with open(CODEX_INSTANCE_FILE, "r", encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def _write_codex_instance(instance):
+    temporary = CODEX_INSTANCE_FILE + ".tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write(instance)
+        os.replace(temporary, CODEX_INSTANCE_FILE)
+    except OSError:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+
+
+def _daemon_log(message):
+    print(
+        "%s %s"
+        % (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), message),
+        flush=True,
+    )
+
+
 def focus_daemon():
     try:
         refresh_seconds = max(
@@ -638,14 +723,50 @@ def focus_daemon():
     last_idle_refresh = 0.0
     last_focus_attempt = 0.0
     last_observed_state = None
+    last_codex_instance = _read_codex_instance()
+    _daemon_log(
+        "watcher started previous_codex_instance=%s"
+        % (last_codex_instance or "none")
+    )
 
     while True:
         now = time.monotonic()
+        codex_instance = _codex_application_instance()
+        if codex_instance != last_codex_instance:
+            if codex_instance:
+                _daemon_log(
+                    "Codex application launch detected instance=%s" % codex_instance
+                )
+                run({"hook_event_name": "SessionStart"})
+            else:
+                _daemon_log("Codex application stopped")
+            _write_codex_instance(codex_instance)
+            last_codex_instance = codex_instance
+
         current_state = _read_state()
         if current_state != last_observed_state:
             if current_state == "idle":
                 last_idle_refresh = 0.0
             last_observed_state = current_state
+
+        if os.path.exists(IDLE_REFRESH_MARKER):
+            weekly = _weekly_rate_limit()
+
+            def refresh_requested_idle():
+                try:
+                    if _read_state() == "idle":
+                        return _display_weekly(weekly)
+                    return False
+                finally:
+                    _clear_idle_refresh_request()
+
+            refreshed = _with_focus_lock(refresh_requested_idle)
+            _daemon_log(
+                "idle refresh completed usage=%s display=%s"
+                % ("ok" if weekly is not None else "unavailable", bool(refreshed))
+            )
+            last_idle_refresh = time.monotonic()
+            last_observed_state = _read_state()
 
         focus_ready = (
             os.path.exists(FOCUS_MARKER)

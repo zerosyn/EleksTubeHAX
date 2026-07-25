@@ -1001,20 +1001,20 @@ All MQTT messages from and to the clock are also traced out via the serial inter
 
 This integration is **not installed automatically** by cloning the repository or starting Codex. Each Mac needs a one-time manual installation because the files live in the user's global Codex and LaunchAgent directories, outside this repository. After installation, Codex runs the hooks automatically and macOS starts the focus watcher automatically at login.
 
-The current implementation is macOS-only. It uses `fcntl`, `/usr/bin/curl`, `/usr/bin/lsappinfo`, and a user LaunchAgent. Do not install it unchanged on Windows or Linux.
+The current implementation is macOS-only. It uses `fcntl`, `/usr/bin/curl`, `/bin/ps`, `/usr/bin/lsappinfo`, and a user LaunchAgent. Do not install it unchanged on Windows or Linux.
 
 #### 5.7.1 What the integration does
 
 | State | Codex event or condition | Screen 0 | Ambient light | Image fallback |
 | --- | --- | --- | --- | --- |
-| INIT / IDLE | `SessionStart`, or Codex becomes frontmost after DONE | dynamic image 249 | rainbow | image 251 |
+| INIT / IDLE | Codex application launch, `SessionStart`, or Codex becomes frontmost after DONE | dynamic image 249 | rainbow | image 251 |
 | WORK | `UserPromptSubmit` or `PostToolUse` | `matrix` | rainbow | image 252 |
 | WAIT | `PermissionRequest` | `swirl` | orange `#FF8000` pulse | image 253 |
 | DONE | `Stop` | `squares` | green `#00FF00` breath | image 254 |
 
 Animation requests use the image fallback only when the animation API fails. Returning to Codex after DONE changes the display to IDLE within about one second. The focus watcher detects the Codex application (`com.openai.codex`), not an individual Codex task window.
 
-The dynamic IDLE image is generated on the Mac from `data/251.bmp`. It moves the black-hole artwork upward, removes the `IDLE` label, and adds a rounded weekly-allowance progress bar plus a line such as `98% 07-29`. The percentage is the remaining weekly Codex allowance and the date is its local reset date. The watcher refreshes the data every five minutes only while the integration is in IDLE state, and uploads image 249 only when its BMP content changes. If Codex usage lookup, rendering, or upload fails, image 251 remains the offline fallback.
+The dynamic IDLE image is generated on the Mac from `data/251.bmp`. It moves the black-hole artwork upward, removes the `IDLE` label, and adds a rounded weekly-allowance progress bar plus a line such as `98% 07-29`. The percentage is the remaining weekly Codex allowance and the date is its local reset date. The watcher detects a newly launched `com.openai.codex` application instance, while `SessionStart` covers task lifecycle starts; either event requests an immediate refresh without blocking Codex startup. The watcher then refreshes the data every five minutes only while the integration is in IDLE state, and uploads image 249 only when its BMP content changes. If Codex usage lookup, rendering, or upload fails, image 251 remains the offline fallback.
 
 The watcher reads structured data from the local Codex app-server method `account/rateLimits/read` and selects the window whose duration is exactly 10,080 minutes. It does not scrape `/usage` output or call a private ChatGPT HTTP endpoint. The renderer uses only the Python standard library.
 
