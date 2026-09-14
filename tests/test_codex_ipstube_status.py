@@ -50,7 +50,7 @@ class CodexIPSTubeStatusTests(unittest.TestCase):
     @mock.patch.object(MODULE, "_request_idle_refresh")
     @mock.patch.object(MODULE, "_clear_focus_marker")
     @mock.patch.object(MODULE, "_write_state")
-    def test_session_start_requests_weekly_refresh(
+    def test_session_start_requests_usage_refresh(
         self,
         write_state,
         clear_focus_marker,
@@ -92,19 +92,94 @@ class CodexIPSTubeStatusTests(unittest.TestCase):
                 mock.patch.object(MODULE, "_codex_application_instance", return_value=""),
                 mock.patch.object(MODULE, "_daemon_log"),
                 mock.patch.object(
-                    MODULE, "_weekly_rate_limit", return_value=(87, "07-29")
-                ) as weekly,
+                    MODULE,
+                    "_rate_limits",
+                    return_value={
+                        "five_hour": (96, "03:34"),
+                        "weekly": (94, "09-19"),
+                    },
+                ) as rate_limits,
                 mock.patch.object(
-                    MODULE, "_display_weekly", return_value=True
-                ) as display_weekly,
+                    MODULE, "_display_limits", return_value=True
+                ) as display_limits,
                 mock.patch.object(MODULE.time, "sleep", side_effect=StopIteration),
             ):
                 with self.assertRaises(StopIteration):
                     MODULE.focus_daemon()
 
-            weekly.assert_called_once_with()
-            display_weekly.assert_called_once_with((87, "07-29"))
+            rate_limits.assert_called_once_with()
+            display_limits.assert_called_once_with(
+                {"five_hour": (96, "03:34"), "weekly": (94, "09-19")}
+            )
             self.assertFalse(os.path.exists(refresh_marker))
+
+    def test_extracts_five_hour_and_weekly_limits_by_duration(self):
+        reset = 1789412092
+        result = {
+            "rateLimitsByLimitId": {
+                "codex": {
+                    "primary": {
+                        "usedPercent": 4,
+                        "windowDurationMins": 300,
+                        "resetsAt": reset,
+                    },
+                    "secondary": {
+                        "usedPercent": 6,
+                        "windowDurationMins": 10080,
+                        "resetsAt": reset,
+                    },
+                }
+            }
+        }
+        limits = MODULE._extract_rate_limits(result)
+        self.assertEqual(limits["five_hour"][0], 96)
+        self.assertEqual(limits["weekly"][0], 94)
+        self.assertEqual(
+            limits["five_hour"][1],
+            MODULE.datetime.datetime.fromtimestamp(reset).strftime("%H:%M"),
+        )
+        self.assertEqual(
+            limits["weekly"][1],
+            MODULE.datetime.datetime.fromtimestamp(reset).strftime("%m-%d"),
+        )
+
+    def test_extracts_limits_when_primary_and_secondary_are_reversed(self):
+        result = {
+            "rateLimits": {
+                "primary": {
+                    "usedPercent": 25,
+                    "windowDurationMins": 10080,
+                    "resetsAt": 1789811716,
+                },
+                "secondary": {
+                    "usedPercent": 40,
+                    "windowDurationMins": 300,
+                    "resetsAt": 1789412092,
+                },
+            }
+        }
+        limits = MODULE._extract_rate_limits(result)
+        self.assertEqual(limits["five_hour"][0], 60)
+        self.assertEqual(limits["weekly"][0], 75)
+
+    def test_renders_both_limits_at_one_hundred_percent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = os.path.join(temporary, "idle.bmp")
+            with mock.patch.object(
+                MODULE, "_draw_status_text", wraps=MODULE._draw_status_text
+            ) as draw_status_text:
+                self.assertTrue(
+                    MODULE._render_idle_bmp(
+                        {
+                            "five_hour": (100, "03:34"),
+                            "weekly": (100, "09-19"),
+                        },
+                        output,
+                    )
+                )
+            self.assertEqual(draw_status_text.call_args_list[0].args[1], "100% 03:34")
+            self.assertEqual(draw_status_text.call_args_list[1].args[1], "100% 09-19")
+            self.assertGreater(os.path.getsize(output), 0)
 
     @mock.patch.object(MODULE, "_daemon_log")
     @mock.patch.object(MODULE.time, "sleep", side_effect=StopIteration)

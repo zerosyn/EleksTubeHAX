@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Map Codex lifecycle hooks and weekly usage to the IPSTube display."""
+"""Map Codex lifecycle hooks and usage limits to the IPSTube display."""
 
 import collections
 import datetime
@@ -18,7 +18,7 @@ import time
 
 # User-level settings. Environment variables can override these values.
 DEFAULT_IPSTUBE_URL = "http://ipstube.local"
-DEFAULT_IPSTUBE_PROXY = "socks5h://127.0.0.1:3070"
+DEFAULT_IPSTUBE_PROXY = ""
 DEFAULT_STATUS_SCREEN = 0
 DEFAULT_WORK_ANIMATION = "matrix"
 DEFAULT_IDLE_REFRESH_SECONDS = 300
@@ -37,6 +37,7 @@ IDLE_HASH = "/tmp/codex-ipstube-idle.sha256"
 DYNAMIC_IDLE_IMAGE = 249
 IDLE_FALLBACK_IMAGE = 251
 WEEK_MINUTES = 7 * 24 * 60
+FIVE_HOUR_MINUTES = 5 * 60
 BLACK_HOLE_SHIFT_Y = -18
 
 FONT_5X7 = {
@@ -51,6 +52,9 @@ FONT_5X7 = {
     "8": ("01110", "10001", "10001", "01110", "10001", "10001", "01110"),
     "9": ("01110", "10001", "10001", "01111", "00001", "00001", "01110"),
     "%": ("11001", "11010", "00100", "01000", "10110", "00110", "00000"),
+    ":": ("00000", "00100", "00100", "00000", "00100", "00100", "00000"),
+    "D": ("11110", "10001", "10001", "10001", "10001", "10001", "11110"),
+    "H": ("10001", "10001", "10001", "11111", "10001", "10001", "10001"),
     "-": ("00000", "00000", "00000", "11111", "00000", "00000", "00000"),
     " ": ("00000", "00000", "00000", "00000", "00000", "00000", "00000"),
 }
@@ -113,6 +117,8 @@ def _post_json(path, payload):
     ]
     if proxy:
         command.extend(["--proxy", proxy])
+    else:
+        command.extend(["--noproxy", "*"])
     command.extend(
         [
             "--request",
@@ -165,6 +171,8 @@ def _upload_image(image, path):
     ]
     if proxy:
         command.extend(["--proxy", proxy])
+    else:
+        command.extend(["--noproxy", "*"])
     command.extend(
         [
             "--request",
@@ -342,7 +350,51 @@ def _wait_for_response(process, request_id, deadline):
     return None
 
 
-def _weekly_rate_limit():
+def _extract_rate_limits(result):
+    if not isinstance(result, dict):
+        return None
+
+    snapshots = []
+    by_id = result.get("rateLimitsByLimitId")
+    if isinstance(by_id, dict):
+        preferred = by_id.get("codex")
+        if isinstance(preferred, dict):
+            snapshots.append(preferred)
+        snapshots.extend(
+            item
+            for key, item in by_id.items()
+            if key != "codex" and isinstance(item, dict)
+        )
+    fallback = result.get("rateLimits")
+    if isinstance(fallback, dict):
+        snapshots.append(fallback)
+
+    limits = {}
+    for snapshot in snapshots:
+        for name in ("primary", "secondary"):
+            window = snapshot.get(name)
+            if not isinstance(window, dict):
+                continue
+            duration = window.get("windowDurationMins")
+            if duration == FIVE_HOUR_MINUTES:
+                key, reset_format = "five_hour", "%H:%M"
+            elif duration == WEEK_MINUTES:
+                key, reset_format = "weekly", "%m-%d"
+            else:
+                continue
+            if key in limits:
+                continue
+            used = window.get("usedPercent")
+            reset = window.get("resetsAt")
+            if not isinstance(used, (int, float)) or not isinstance(reset, int):
+                continue
+            remaining = max(0, min(100, int(round(100 - used))))
+            reset_text = datetime.datetime.fromtimestamp(reset).strftime(reset_format)
+            limits[key] = remaining, reset_text
+    return limits or None
+
+
+def _rate_limits():
     executable = _codex_binary()
     if executable is None:
         return None
@@ -380,36 +432,7 @@ def _weekly_rate_limit():
         if not isinstance(result, dict):
             return None
 
-        snapshots = []
-        by_id = result.get("rateLimitsByLimitId")
-        if isinstance(by_id, dict):
-            preferred = by_id.get("codex")
-            if isinstance(preferred, dict):
-                snapshots.append(preferred)
-            snapshots.extend(
-                item
-                for key, item in by_id.items()
-                if key != "codex" and isinstance(item, dict)
-            )
-        fallback = result.get("rateLimits")
-        if isinstance(fallback, dict):
-            snapshots.append(fallback)
-
-        for snapshot in snapshots:
-            for name in ("primary", "secondary"):
-                window = snapshot.get(name)
-                if not isinstance(window, dict):
-                    continue
-                if window.get("windowDurationMins") != WEEK_MINUTES:
-                    continue
-                used = window.get("usedPercent")
-                reset = window.get("resetsAt")
-                if not isinstance(used, (int, float)) or not isinstance(reset, int):
-                    continue
-                remaining = max(0, min(100, int(round(100 - used))))
-                reset_date = datetime.datetime.fromtimestamp(reset).strftime("%m-%d")
-                return remaining, reset_date
-        return None
+        return _extract_rate_limits(result)
     except Exception:
         return None
     finally:
@@ -473,8 +496,8 @@ def _rounded_contains(px, py, x, y, width, height, radius):
     return (px - center_x) ** 2 + (py - center_y) ** 2 <= radius**2
 
 
-def _draw_progress(rows, remaining, color):
-    x, y, width, height, radius = 12, 166, 111, 14, 7
+def _draw_progress(rows, remaining, color, y):
+    x, width, height, radius = 12, 111, 12, 6
     inner_x, inner_y = x + 2, y + 2
     inner_width, inner_height, inner_radius = width - 4, height - 4, radius - 2
     fill_width = int(round(inner_width * remaining / 100.0))
@@ -488,13 +511,12 @@ def _draw_progress(rows, remaining, color):
                 rows[py][px] = color
 
 
-def _draw_status_text(rows, text, color):
+def _draw_status_text(rows, text, color, start_y):
     scale = 2
     glyph_width = 5 * scale
     spacing = 2
     total_width = len(text) * glyph_width + max(0, len(text) - 1) * spacing
     start_x = max(0, (135 - total_width) // 2)
-    start_y = 199
     for index, character in enumerate(text):
         glyph = FONT_5X7[character]
         origin_x = start_x + index * (glyph_width + spacing)
@@ -509,7 +531,7 @@ def _draw_status_text(rows, text, color):
                         ] = color
 
 
-def _render_idle_bmp(remaining, reset_date, output_path=IDLE_BMP):
+def _render_idle_bmp(limits, output_path=IDLE_BMP):
     template = _template_path()
     if template is None:
         return False
@@ -534,8 +556,29 @@ def _render_idle_bmp(remaining, reset_date, output_path=IDLE_BMP):
             if 0 <= target_y < 240:
                 rows[target_y][:] = source_rows[source_y]
 
-        _draw_progress(rows, remaining, idle_color)
-        _draw_status_text(rows, "%d%% %s" % (remaining, reset_date), idle_color)
+        five_hour = limits.get("five_hour") if limits else None
+        weekly = limits.get("weekly") if limits else None
+        five_remaining, five_reset = five_hour or (0, "--:--")
+        week_remaining, week_reset = weekly or (0, "-- --")
+
+        _draw_progress(rows, five_remaining, idle_color, 148)
+        _draw_status_text(
+            rows,
+            "%d%% %s" % (five_remaining, five_reset)
+            if five_hour
+            else "--% --:--",
+            idle_color,
+            164,
+        )
+        _draw_progress(rows, week_remaining, idle_color, 190)
+        _draw_status_text(
+            rows,
+            "%d%% %s" % (week_remaining, week_reset)
+            if weekly
+            else "--% -- --",
+            idle_color,
+            206,
+        )
 
         for y, row in enumerate(rows):
             start = pixel_offset + (239 - y) * stride
@@ -573,14 +616,13 @@ def _upload_idle_if_changed():
 
 
 def _refresh_idle_display():
-    return _display_weekly(_weekly_rate_limit())
+    return _display_limits(_rate_limits())
 
 
-def _display_weekly(weekly):
-    if weekly is None:
+def _display_limits(limits):
+    if limits is None:
         return _post_image(IDLE_FALLBACK_IMAGE)
-    remaining, reset_date = weekly
-    if not _render_idle_bmp(remaining, reset_date):
+    if not _render_idle_bmp(limits):
         return _post_image(IDLE_FALLBACK_IMAGE)
     if not _upload_idle_if_changed():
         return _post_image(IDLE_FALLBACK_IMAGE)
@@ -750,12 +792,12 @@ def focus_daemon():
             last_observed_state = current_state
 
         if os.path.exists(IDLE_REFRESH_MARKER):
-            weekly = _weekly_rate_limit()
+            limits = _rate_limits()
 
             def refresh_requested_idle():
                 try:
                     if _read_state() == "idle":
-                        return _display_weekly(weekly)
+                        return _display_limits(limits)
                     return False
                 finally:
                     _clear_idle_refresh_request()
@@ -763,7 +805,7 @@ def focus_daemon():
             refreshed = _with_focus_lock(refresh_requested_idle)
             _daemon_log(
                 "idle refresh completed usage=%s display=%s"
-                % ("ok" if weekly is not None else "unavailable", bool(refreshed))
+                % ("ok" if limits is not None else "unavailable", bool(refreshed))
             )
             last_idle_refresh = time.monotonic()
             last_observed_state = _read_state()
@@ -775,7 +817,7 @@ def focus_daemon():
         )
         if focus_ready:
             last_focus_attempt = now
-            weekly = _weekly_rate_limit()
+            limits = _rate_limits()
 
             def return_to_idle():
                 if not os.path.exists(FOCUS_MARKER):
@@ -783,7 +825,7 @@ def focus_daemon():
                 if _frontmost_bundle_id() != CODEX_BUNDLE_ID:
                     return
                 _write_state("idle")
-                image_updated = _display_weekly(weekly)
+                image_updated = _display_limits(limits)
                 backlight_updated = _set_backlight(*EVENT_BACKLIGHTS["SessionStart"])
                 if image_updated and backlight_updated:
                     _clear_focus_marker()
@@ -794,12 +836,12 @@ def focus_daemon():
 
         now = time.monotonic()
         if _read_state() == "idle" and now - last_idle_refresh >= refresh_seconds:
-            weekly = _weekly_rate_limit()
+            limits = _rate_limits()
 
             def refresh_if_still_idle():
                 if _read_state() != "idle":
                     return
-                _display_weekly(weekly)
+                _display_limits(limits)
 
             _with_focus_lock(refresh_if_still_idle)
             last_idle_refresh = now
