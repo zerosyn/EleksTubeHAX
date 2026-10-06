@@ -14,6 +14,48 @@ SPEC.loader.exec_module(MODULE)
 
 
 class CodexIPSTubeStatusTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        patcher = mock.patch.object(
+            MODULE, "PENDING_EVENT_FILE", os.path.join(temporary.name, "pending.json")
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_failed_resume_is_retried_until_animation_and_light_succeed(self):
+        with (
+            mock.patch.object(MODULE, "_with_focus_lock", side_effect=lambda cb: cb()),
+            mock.patch.object(MODULE, "_write_state"),
+            mock.patch.object(MODULE, "_clear_focus_marker"),
+            mock.patch.object(MODULE, "_post_image", return_value=True),
+            mock.patch.object(MODULE, "_start_animation", side_effect=[False, True, True]) as animation,
+            mock.patch.object(MODULE, "_set_backlight", side_effect=[False, False, True]) as light,
+        ):
+            MODULE.run({"hook_event_name": "PostToolUse"})
+            self.assertTrue(os.path.exists(MODULE.PENDING_EVENT_FILE))
+            MODULE._retry_pending_event()
+            self.assertTrue(os.path.exists(MODULE.PENDING_EVENT_FILE))
+            MODULE._retry_pending_event()
+            self.assertFalse(os.path.exists(MODULE.PENDING_EVENT_FILE))
+            MODULE._retry_pending_event()
+            self.assertEqual(animation.call_args_list, [mock.call("matrix")] * 3)
+            self.assertEqual(light.call_args_list, [mock.call("rainbow", None)] * 3)
+
+    def test_resume_replaces_pending_wait_even_if_hook_is_interrupted(self):
+        with (
+            mock.patch.object(MODULE, "_with_focus_lock", side_effect=lambda cb: cb()),
+            mock.patch.object(MODULE, "_write_state"),
+            mock.patch.object(MODULE, "_clear_focus_marker"),
+            mock.patch.object(MODULE, "_deliver_event", side_effect=TimeoutError),
+        ):
+            for event in ("PermissionRequest", "PostToolUse"):
+                with self.assertRaises(TimeoutError):
+                    MODULE.run({"hook_event_name": event})
+        with mock.patch.object(MODULE, "_deliver_event") as deliver:
+            MODULE._retry_pending_event()
+            deliver.assert_called_once_with("PostToolUse")
+
     def test_event_mapping(self):
         self.assertEqual(MODULE.image_for_event("SessionStart"), 251)
         self.assertEqual(MODULE.image_for_event("UserPromptSubmit"), 252)
@@ -21,6 +63,55 @@ class CodexIPSTubeStatusTests(unittest.TestCase):
         self.assertEqual(MODULE.image_for_event("PostToolUse"), 252)
         self.assertEqual(MODULE.image_for_event("Stop"), 254)
         self.assertIsNone(MODULE.image_for_event("PreToolUse"))
+
+    @mock.patch.object(MODULE.subprocess, "run")
+    def test_frontmost_bundle_id_accepts_macos_output_formats(self, run):
+        for output, expected in (
+            ('"CFBundleIdentifier"="com.openai.codex"', "com.openai.codex"),
+            ('[ NULL ] ASN:0x0-0x2f12f1: (in front)\n    bundleID="com.openai.codex"\n', "com.openai.codex"),
+            ('    bundleID = "com.apple.finder"\n', "com.apple.finder"),
+            ('    bundleID=[ NULL ]\n', ""),
+        ):
+            with self.subTest(output=output):
+                run.side_effect = [
+                    mock.Mock(stdout="ASN:0x0-0x2f12f1:"),
+                    mock.Mock(stdout=output),
+                ]
+                self.assertEqual(MODULE._frontmost_bundle_id(), expected)
+
+    def test_done_returns_to_idle_only_when_codex_is_frontmost(self):
+        for bundle_id in ("com.openai.codex", "com.apple.finder", ""):
+            with self.subTest(bundle_id=bundle_id), tempfile.TemporaryDirectory() as directory:
+                marker = os.path.join(directory, "done")
+                Path(marker).touch()
+                with (
+                    mock.patch.object(MODULE, "FOCUS_MARKER", marker),
+                    mock.patch.object(MODULE, "IDLE_REFRESH_MARKER", os.path.join(directory, "refresh")),
+                    mock.patch.object(MODULE, "_read_codex_instance", return_value="pid:1"),
+                    mock.patch.object(MODULE, "_codex_application_instance", return_value="pid:1"),
+                    mock.patch.object(MODULE, "_frontmost_bundle_id", return_value=bundle_id),
+                    mock.patch.object(MODULE, "_with_focus_lock", side_effect=lambda cb: cb()),
+                    mock.patch.object(MODULE, "_read_state", return_value="done"),
+                    mock.patch.object(MODULE, "_write_state") as write_state,
+                    mock.patch.object(MODULE, "_rate_limits", return_value=None),
+                    mock.patch.object(MODULE, "_display_limits", return_value=True) as display,
+                    mock.patch.object(MODULE, "_set_backlight", return_value=True) as light,
+                    mock.patch.object(MODULE, "_daemon_log"),
+                    mock.patch.object(MODULE.time, "monotonic", return_value=100),
+                    mock.patch.object(MODULE.time, "sleep", side_effect=StopIteration),
+                ):
+                    with self.assertRaises(StopIteration):
+                        MODULE.focus_daemon()
+                if bundle_id == "com.openai.codex":
+                    write_state.assert_called_once_with("idle")
+                    display.assert_called_once_with(None)
+                    light.assert_called_once_with("rainbow", None)
+                    self.assertFalse(os.path.exists(marker))
+                else:
+                    write_state.assert_not_called()
+                    display.assert_not_called()
+                    light.assert_not_called()
+                    self.assertTrue(os.path.exists(marker))
 
     @mock.patch.object(MODULE, "_with_focus_lock", side_effect=lambda callback: callback())
     @mock.patch.object(MODULE, "_set_backlight")
@@ -220,6 +311,42 @@ class CodexIPSTubeStatusTests(unittest.TestCase):
     @mock.patch.object(MODULE.sys, "stdin", io.StringIO("not json"))
     def test_invalid_stdin_exits_successfully(self):
         self.assertEqual(MODULE.main(), 0)
+
+    @mock.patch.object(MODULE.subprocess, "run")
+    def test_instance_probe_distinguishes_failure_from_stopped(self, run):
+        for result in (mock.Mock(returncode=1, stdout=""), TimeoutError("timeout")):
+            with self.subTest(result=result):
+                run.reset_mock()
+                run.side_effect = [result]
+                self.assertIsNone(MODULE._codex_application_instance())
+                self.assertEqual(run.call_count, 1)
+        run.side_effect = [mock.Mock(returncode=0, stdout="123 /other/app\n")]
+        self.assertEqual(MODULE._codex_application_instance(), "")
+
+    def test_instance_detection_does_not_reset_status_on_probe_failure_or_migration(self):
+        for previous, observations, expected_events, expected_writes in (
+            ("pid:1", [None, "pid:1"], 0, []),
+            ("pid:1", [None, "pid:2"], 1, [mock.call("pid:2")]),
+            ("pid:1", ["", "pid:2"], 1, [mock.call(""), mock.call("pid:2")]),
+            ('ASN:0x0-0x123-"ChatGPT":', [None, "pid:1"], 0, [mock.call("pid:1")]),
+        ):
+            with self.subTest(previous=previous, observations=observations), tempfile.TemporaryDirectory() as directory:
+                with (
+                    mock.patch.object(MODULE, "FOCUS_MARKER", os.path.join(directory, "done")),
+                    mock.patch.object(MODULE, "IDLE_REFRESH_MARKER", os.path.join(directory, "refresh")),
+                    mock.patch.object(MODULE, "_read_codex_instance", return_value=previous),
+                    mock.patch.object(MODULE, "_codex_application_instance", side_effect=observations),
+                    mock.patch.object(MODULE, "_write_codex_instance") as write_instance,
+                    mock.patch.object(MODULE, "run") as run,
+                    mock.patch.object(MODULE, "_with_focus_lock", side_effect=lambda cb: cb()),
+                    mock.patch.object(MODULE, "_read_state", return_value="work"),
+                    mock.patch.object(MODULE, "_daemon_log"),
+                    mock.patch.object(MODULE.time, "sleep", side_effect=[None, StopIteration]),
+                ):
+                    with self.assertRaises(StopIteration):
+                        MODULE.focus_daemon()
+                self.assertEqual(run.call_args_list, [mock.call({"hook_event_name": "SessionStart"})] * expected_events)
+                self.assertEqual(write_instance.call_args_list, expected_writes)
 
 
 if __name__ == "__main__":

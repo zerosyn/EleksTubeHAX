@@ -17,7 +17,7 @@ import time
 
 
 # User-level settings. Environment variables can override these values.
-DEFAULT_IPSTUBE_URL = "http://ipstube.local"
+DEFAULT_IPSTUBE_URL = "http://ipstube.home"
 DEFAULT_IPSTUBE_PROXY = ""
 DEFAULT_STATUS_SCREEN = 0
 DEFAULT_WORK_ANIMATION = "matrix"
@@ -30,6 +30,7 @@ CODEX_BUNDLE_ID = "com.openai.codex"
 FOCUS_MARKER = "/tmp/codex-ipstube-done"
 FOCUS_LOCK = "/tmp/codex-ipstube-focus.lock"
 STATE_FILE = "/tmp/codex-ipstube-state.json"
+PENDING_EVENT_FILE = "/tmp/codex-ipstube-pending.json"
 CODEX_INSTANCE_FILE = "/tmp/codex-ipstube-codex-instance"
 IDLE_REFRESH_MARKER = "/tmp/codex-ipstube-refresh-idle"
 IDLE_BMP = "/tmp/codex-ipstube-idle.bmp"
@@ -642,24 +643,51 @@ def run(hook_input):
         return 0
 
     def update_status():
+        # Persist before network I/O: hooks can time out or the device can be offline.
+        with open(PENDING_EVENT_FILE + ".tmp", "w", encoding="utf-8") as handle:
+            json.dump({"hook_event_name": event_name}, handle)
+        os.replace(PENDING_EVENT_FILE + ".tmp", PENDING_EVENT_FILE)
         _write_state(EVENT_STATES[event_name])
         _clear_focus_marker()
         if event_name == "SessionStart":
             _request_idle_refresh()
-        animation = _animation_for_event(event_name)
-        if animation is not None:
-            if not _start_animation(animation):
-                _post_image(image)
-        else:
-            _post_image(image)
-        backlight = EVENT_BACKLIGHTS.get(event_name)
-        if backlight is not None:
-            _set_backlight(*backlight)
         if event_name == "Stop":
             _write_focus_marker(hook_input)
+        _deliver_event(event_name)
 
     _with_focus_lock(update_status)
     return 0
+
+
+def _clear_pending_event():
+    try:
+        os.unlink(PENDING_EVENT_FILE)
+    except FileNotFoundError:
+        pass
+
+
+def _deliver_event(event_name):
+    """Called under the focus lock; acknowledge only a complete device update."""
+    animation = _animation_for_event(event_name)
+    if animation is not None:
+        display_updated = _start_animation(animation)
+        if not display_updated:
+            _post_image(image_for_event(event_name))
+    else:
+        display_updated = _post_image(image_for_event(event_name))
+    backlight_updated = _set_backlight(*EVENT_BACKLIGHTS[event_name])
+    if display_updated and backlight_updated:
+        _clear_pending_event()
+
+
+def _retry_pending_event():
+    try:
+        with open(PENDING_EVENT_FILE, encoding="utf-8") as handle:
+            event_name = json.load(handle).get("hook_event_name")
+    except (OSError, ValueError, AttributeError):
+        return
+    if event_name in EVENT_STATES:
+        _deliver_event(event_name)
 
 
 def _frontmost_bundle_id():
@@ -680,13 +708,18 @@ def _frontmost_bundle_id():
             timeout=2.0,
             check=False,
         ).stdout
-        match = re.search(r'"CFBundleIdentifier"="([^"]+)"', info)
+        match = re.search(
+            r'^\s*"?(?:CFBundleIdentifier|bundleID)"?\s*=\s*"([^"\r\n]+)"',
+            info,
+            re.MULTILINE,
+        )
         return match.group(1) if match else ""
     except Exception:
         return ""
 
 
 def _codex_application_instance():
+    """Return a PID identity, an empty string if stopped, or None if unknown."""
     executable_paths = {
         "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
         "/Applications/Codex.app/Contents/MacOS/Codex",
@@ -699,26 +732,15 @@ def _codex_application_instance():
             timeout=2.0,
             check=False,
         )
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                fields = line.strip().split(None, 1)
-                if len(fields) == 2 and fields[0].isdigit() and fields[1] in executable_paths:
-                    return "pid:" + fields[0]
-    except Exception:
-        pass
-
-    try:
-        result = subprocess.run(
-            ["/usr/bin/lsappinfo", "find", "bundleid=" + CODEX_BUNDLE_ID],
-            capture_output=True,
-            text=True,
-            timeout=2.0,
-            check=False,
-        )
-        instance = result.stdout.strip()
-        return instance if result.returncode == 0 and "NULL" not in instance else ""
-    except Exception:
+        if result.returncode != 0:
+            return None
+        for line in result.stdout.splitlines():
+            fields = line.strip().split(None, 1)
+            if len(fields) == 2 and fields[0].isdigit() and fields[1] in executable_paths:
+                return "pid:" + fields[0]
         return ""
+    except Exception:
+        return None
 
 
 def _read_codex_instance():
@@ -774,8 +796,11 @@ def focus_daemon():
     while True:
         now = time.monotonic()
         codex_instance = _codex_application_instance()
-        if codex_instance != last_codex_instance:
-            if codex_instance:
+        if codex_instance is not None and codex_instance != last_codex_instance:
+            if last_codex_instance.startswith("ASN:"):
+                # Migrate the old fallback identity without resetting task status.
+                _daemon_log("migrated Codex application identity to %s" % (codex_instance or "stopped"))
+            elif codex_instance:
                 _daemon_log(
                     "Codex application launch detected instance=%s" % codex_instance
                 )
@@ -785,6 +810,7 @@ def focus_daemon():
             _write_codex_instance(codex_instance)
             last_codex_instance = codex_instance
 
+        _with_focus_lock(_retry_pending_event)
         current_state = _read_state()
         if current_state != last_observed_state:
             if current_state == "idle":
@@ -824,6 +850,7 @@ def focus_daemon():
                     return
                 if _frontmost_bundle_id() != CODEX_BUNDLE_ID:
                     return
+                _clear_pending_event()
                 _write_state("idle")
                 image_updated = _display_limits(limits)
                 backlight_updated = _set_backlight(*EVENT_BACKLIGHTS["SessionStart"])
@@ -852,9 +879,14 @@ def main():
     if len(sys.argv) == 2 and sys.argv[1] == "--focus-daemon":
         return focus_daemon()
     if len(sys.argv) == 2 and sys.argv[1] == "--refresh-idle":
-        _write_state("idle")
-        updated = _with_focus_lock(_refresh_idle_display)
-        _set_backlight(*EVENT_BACKLIGHTS["SessionStart"])
+        def refresh_idle():
+            _clear_pending_event()
+            _write_state("idle")
+            updated = _refresh_idle_display()
+            _set_backlight(*EVENT_BACKLIGHTS["SessionStart"])
+            return updated
+
+        updated = _with_focus_lock(refresh_idle)
         return 0 if updated else 1
     try:
         hook_input = json.load(sys.stdin)

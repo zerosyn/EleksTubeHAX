@@ -1014,6 +1014,8 @@ The current implementation is macOS-only. It uses `fcntl`, `/usr/bin/curl`, `/bi
 
 Animation requests use the image fallback only when the animation API fails. Returning to Codex after DONE changes the display to IDLE within about one second. The focus watcher detects the Codex application (`com.openai.codex`), not an individual Codex task window.
 
+Device updates are saved before sending. If a hook times out or either the animation or backlight request fails, the focus watcher retries the latest update until both succeed. New events replace pending updates, so an old WAIT is not replayed after WORK. Approval itself has no handler here: WORK resumes on `PostToolUse`, after the tool finishes.
+
 The dynamic IDLE image is generated on the Mac from `data/251.bmp`. It moves the black-hole artwork upward, removes the `IDLE` label, and places two rounded allowance bars below it. The first line, such as `96% 03:34`, shows the remaining five-hour allowance and its local reset time. The second line, such as `94% 09-19`, shows the remaining weekly allowance and its local reset date. The vertical order distinguishes the two windows without adding `5H` or `7D` labels. The watcher detects a newly launched `com.openai.codex` application instance, while `SessionStart` covers task lifecycle starts; either event requests an immediate refresh without blocking Codex startup. The watcher then refreshes the data every five minutes only while the integration is in IDLE state, and uploads image 249 only when its BMP content changes. If Codex usage lookup, rendering, or upload fails, image 251 remains the offline fallback.
 
 The watcher reads structured data from the local Codex app-server method `account/rateLimits/read` and selects windows by duration: exactly 300 minutes for the five-hour limit and 10,080 minutes for the seven-day limit. It does not depend on whether Codex labels them `primary` or `secondary`, scrape `/usage` output, or call a private ChatGPT HTTP endpoint. The renderer uses only the Python standard library.
@@ -1044,14 +1046,14 @@ An agent performing this setup must run as the logged-in macOS user, not as root
 1. Confirm that the clock is reachable from the Mac.
 
    ```bash
-   curl -sS --max-time 5 http://ipstube.local/api/config
+   curl -sS --max-time 5 http://ipstube.home/api/config
    ```
 
 2. Review the per-machine settings before copying files.
 
    | Setting | Repository default | Notes |
    | --- | --- | --- |
-   | `IPSTUBE_URL` | `http://ipstube.local` | A stable IP address such as `http://192.168.2.202` can be used if `.local` resolution is unreliable. |
+   | `IPSTUBE_URL` | `http://ipstube.home` | Local DNS resolves this name to the clock; a stable IP address such as `http://192.168.2.202` can also be used. |
    | `IPSTUBE_PROXY` | empty (direct LAN connection) | Set a proxy URL only when required. An empty value explicitly bypasses inherited proxy environment variables. |
    | `IPSTUBE_STATUS_SCREEN` | `0` | Valid values are 0 through 5. Screen 0 is the MANUAL status screen in the repository's reversed default layout. |
    | `IPSTUBE_IDLE_REFRESH_SECONDS` | `300` | Usage refresh interval while IDLE; values below 60 seconds are clamped to 60. |
@@ -1141,7 +1143,7 @@ Verify the script independently before relying on lifecycle events:
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 printf '%s' '{"hook_event_name":"UserPromptSubmit"}' | \
   /usr/bin/python3 "$CODEX_HOME/hooks/codex_ipstube_status.py"
-curl -sS --max-time 5 http://ipstube.local/api/config
+curl -sS --max-time 5 http://ipstube.home/api/config
 ```
 
 The status screen should report `animation: "matrix"` and the backlight should report `effect: "rainbow"`. To test WAIT, send `PermissionRequest`; it should report `animation: "swirl"`, `effect: "pulse"`, and color `#FF8000`.
@@ -1151,7 +1153,7 @@ Test the dynamic IDLE image separately:
 ```bash
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 /usr/bin/python3 "$CODEX_HOME/hooks/codex_ipstube_status.py" --refresh-idle
-curl -sS --max-time 5 http://ipstube.local/api/config
+curl -sS --max-time 5 http://ipstube.home/api/config
 ```
 
 On success, screen 0 reports image 249 and displays the black hole followed by the five-hour and seven-day remaining-usage bars and reset times. If it reports image 251 instead, check the LaunchAgent log, confirm the template was installed, and verify that the Desktop-bundled `codex app-server` starts under the logged-in user.
