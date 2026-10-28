@@ -1007,14 +1007,14 @@ The current implementation is macOS-only. It uses `fcntl`, `/usr/bin/curl`, `/bi
 
 | State | Codex event or condition | Screen 0 | Ambient light | Image fallback |
 | --- | --- | --- | --- | --- |
-| INIT / IDLE | Codex application launch, `SessionStart`, or Codex becomes frontmost after DONE | dynamic image 249 | rainbow | image 251 |
+| INIT / IDLE | Codex application launch, `SessionStart`, `Interrupt` (manual termination), or Codex becomes frontmost after DONE | dynamic image 249 | rainbow | image 251 |
 | WORK | `UserPromptSubmit` or `PostToolUse` | `matrix` | rainbow | image 252 |
-| WAIT | `PermissionRequest` | `swirl` | orange `#FF8000` pulse | image 253 |
+| WAIT | `PermissionRequest` with manual or unknown reviewer | `swirl` | orange `#FF8000` pulse | image 253 |
 | DONE | `Stop` | `squares` | green `#00FF00` breath | image 254 |
 
 Animation requests use the image fallback only when the animation API fails. Returning to Codex after DONE changes the display to IDLE within about one second. The focus watcher detects the Codex application (`com.openai.codex`), not an individual Codex task window.
 
-Device updates are saved before sending. If a hook times out or either the animation or backlight request fails, the focus watcher retries the latest update until both succeed. New events replace pending updates, so an old WAIT is not replayed after WORK. Approval itself has no handler here: WORK resumes on `PostToolUse`, after the tool finishes.
+Device updates are saved before sending. If a hook times out or either the animation or backlight request fails, the focus watcher retries the latest update until both succeed. New events replace pending updates, so an old WAIT is not replayed after WORK. In Approve for me mode, `PermissionRequest` keeps WORK active during automatic review and tool execution. The script reads `approvals_reviewer` from the latest `turn_context` in the hook's `transcript_path`, checking `turn_id` when supplied. This transcript format is not a stable hook interface; missing, unreadable, or mismatched context falls back to WAIT. Manual approval resumes WORK on `PostToolUse`, after the tool finishes.
 
 The dynamic IDLE image is generated on the Mac from `data/251.bmp`. It moves the black-hole artwork upward, removes the `IDLE` label, and places two rounded allowance bars below it. The first line, such as `96% 03:34`, shows the remaining five-hour allowance and its local reset time. The second line, such as `94% 09-19`, shows the remaining weekly allowance and its local reset date. The vertical order distinguishes the two windows without adding `5H` or `7D` labels. The watcher detects a newly launched `com.openai.codex` application instance, while `SessionStart` covers task lifecycle starts; either event requests an immediate refresh without blocking Codex startup. The watcher then refreshes the data every five minutes only while the integration is in IDLE state, and uploads image 249 only when its BMP content changes. If Codex usage lookup, rendering, or upload fails, image 251 remains the offline fallback.
 
@@ -1074,7 +1074,7 @@ An agent performing this setup must run as the logged-in macOS user, not as root
 4. Install or merge the global hook definitions.
 
    - If `$CODEX_HOME/hooks.json` does not exist, copy `tools/codex_ipstube_hooks.example.json` to it.
-   - If it already exists, merge the five event arrays under the top-level `hooks` object: `SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `PostToolUse`, and `Stop`.
+   - If it already exists, merge the six event arrays under the top-level `hooks` object: `SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `PostToolUse`, `Stop`, and `Interrupt`.
    - Preserve all unrelated events and handlers.
    - Do not add the same IPSTube handler twice when repeating the installation.
 
@@ -1133,7 +1133,7 @@ An agent performing this setup must run as the logged-in macOS user, not as root
 
 7. Restart Codex and trust the hooks.
 
-   Open `/hooks` in the Codex CLI, review the five new or changed handlers, and select **Trust all and continue**. Codex skips non-managed command hooks until their exact definitions are trusted. If the Desktop app does not expose `/hooks`, run the installed `codex` CLI or the CLI bundled inside the Desktop app, complete the trust flow there, and then restart the Desktop app.
+   Open `/hooks` in the Codex CLI, review the new or changed handlers, and select **Trust all and continue**. Codex skips non-managed command hooks until their exact definitions are trusted. If the Desktop app does not expose `/hooks`, run the installed `codex` CLI or the CLI bundled inside the Desktop app, complete the trust flow there, and then restart the Desktop app.
 
 #### 5.7.4 Verification
 

@@ -62,6 +62,7 @@ FONT_5X7 = {
 
 EVENT_IMAGES = {
     "SessionStart": IDLE_FALLBACK_IMAGE,
+    "Interrupt": IDLE_FALLBACK_IMAGE,
     "UserPromptSubmit": 252,
     "PermissionRequest": 253,
     "PostToolUse": 252,
@@ -69,6 +70,7 @@ EVENT_IMAGES = {
 }
 EVENT_STATES = {
     "SessionStart": "idle",
+    "Interrupt": "idle",
     "UserPromptSubmit": "work",
     "PostToolUse": "work",
     "PermissionRequest": "wait",
@@ -81,6 +83,7 @@ EVENT_ANIMATIONS = {
 }
 EVENT_BACKLIGHTS = {
     "SessionStart": ("rainbow", None),
+    "Interrupt": ("rainbow", None),
     "UserPromptSubmit": ("rainbow", None),
     "PostToolUse": ("rainbow", None),
     "PermissionRequest": ("pulse", WAIT_BACKLIGHT_COLOR),
@@ -636,8 +639,38 @@ def _display_limits(limits):
     return _post_image(IDLE_FALLBACK_IMAGE)
 
 
+def _uses_auto_review(hook_input):
+    # permission_mode does not distinguish manual approval from automatic review.
+    transcript = hook_input.get("transcript_path")
+    if not isinstance(transcript, str) or not transcript:
+        return False
+    context = None
+    try:
+        with open(transcript, encoding="utf-8") as handle:
+            for line in handle:
+                if '"turn_context"' not in line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(item, dict) and item.get("type") == "turn_context":
+                    context = item.get("payload")
+    except (OSError, UnicodeError):
+        return False
+    if not isinstance(context, dict):
+        return False
+    turn_id = hook_input.get("turn_id")
+    if turn_id and context.get("turn_id") != turn_id:
+        return False
+    return context.get("approvals_reviewer") == "auto_review"
+
+
 def run(hook_input):
     event_name = hook_input.get("hook_event_name")
+    if event_name == "PermissionRequest" and _uses_auto_review(hook_input):
+        # Automatic review is ongoing work; no human approval is pending here.
+        event_name = "PostToolUse"
     image = image_for_event(event_name)
     if image is None:
         return 0
@@ -649,7 +682,7 @@ def run(hook_input):
         os.replace(PENDING_EVENT_FILE + ".tmp", PENDING_EVENT_FILE)
         _write_state(EVENT_STATES[event_name])
         _clear_focus_marker()
-        if event_name == "SessionStart":
+        if EVENT_STATES[event_name] == "idle":
             _request_idle_refresh()
         if event_name == "Stop":
             _write_focus_marker(hook_input)

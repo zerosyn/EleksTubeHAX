@@ -58,11 +58,94 @@ class CodexIPSTubeStatusTests(unittest.TestCase):
 
     def test_event_mapping(self):
         self.assertEqual(MODULE.image_for_event("SessionStart"), 251)
+        self.assertEqual(MODULE.image_for_event("Interrupt"), 251)
         self.assertEqual(MODULE.image_for_event("UserPromptSubmit"), 252)
         self.assertEqual(MODULE.image_for_event("PermissionRequest"), 253)
         self.assertEqual(MODULE.image_for_event("PostToolUse"), 252)
         self.assertEqual(MODULE.image_for_event("Stop"), 254)
         self.assertIsNone(MODULE.image_for_event("PreToolUse"))
+
+    def test_automatic_review_keeps_work_and_retries_work_instead_of_wait(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory, "transcript.jsonl")
+            transcript.write_text(MODULE.json.dumps({
+                "type": "turn_context",
+                "payload": {"turn_id": "current", "approvals_reviewer": "auto_review"},
+            }) + '\n{"type":"response_item","payload":{}}\n')
+            with (
+                mock.patch.object(MODULE, "_with_focus_lock", side_effect=lambda cb: cb()),
+                mock.patch.object(MODULE, "_write_state") as state,
+                mock.patch.object(MODULE, "_clear_focus_marker"),
+                mock.patch.object(MODULE, "_start_animation", side_effect=[False, True]) as animation,
+                mock.patch.object(MODULE, "_post_image", return_value=True),
+                mock.patch.object(MODULE, "_set_backlight", side_effect=[False, True]) as light,
+            ):
+                MODULE.run({
+                    "hook_event_name": "PermissionRequest", "permission_mode": "default",
+                    "turn_id": "current", "transcript_path": str(transcript),
+                })
+                state.assert_called_once_with("work")
+                self.assertTrue(os.path.exists(MODULE.PENDING_EVENT_FILE))
+                MODULE._retry_pending_event()
+                self.assertFalse(os.path.exists(MODULE.PENDING_EVENT_FILE))
+                self.assertEqual(animation.call_args_list, [mock.call("matrix")] * 2)
+                self.assertEqual(light.call_args_list, [mock.call("rainbow", None)] * 2)
+
+    def test_reviewer_detection_uses_latest_turn_and_defaults_to_manual_wait(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory, "transcript.jsonl")
+            auto = {"type": "turn_context", "payload": {
+                "turn_id": "old", "approvals_reviewer": "auto_review",
+            }}
+            for payload in (
+                {"turn_id": "current", "approvals_reviewer": "user"},
+                {"turn_id": "other", "approvals_reviewer": "auto_review"},
+                {"turn_id": "current"},
+                None,
+            ):
+                with self.subTest(payload=payload):
+                    transcript.write_text('\n'.join(MODULE.json.dumps(item) for item in (
+                        auto, {"type": "turn_context", "payload": payload},
+                    )) + '\n{"type":"turn_context"')
+                    self.assertFalse(MODULE._uses_auto_review({
+                        "turn_id": "current", "transcript_path": str(transcript),
+                    }))
+            for path in (None, "", str(transcript) + ".missing", directory):
+                with self.subTest(path=path):
+                    self.assertFalse(MODULE._uses_auto_review({"transcript_path": path}))
+
+    def test_interrupt_clears_work_wait_and_done_and_retries_idle_delivery(self):
+        for previous in ("work", "wait", "done"):
+            with self.subTest(previous=previous), tempfile.TemporaryDirectory() as directory:
+                with (
+                    mock.patch.object(MODULE, "STATE_FILE", os.path.join(directory, "state")),
+                    mock.patch.object(MODULE, "FOCUS_MARKER", os.path.join(directory, "done")),
+                    mock.patch.object(MODULE, "FOCUS_LOCK", os.path.join(directory, "lock")),
+                    mock.patch.object(MODULE, "IDLE_REFRESH_MARKER", os.path.join(directory, "refresh")),
+                    mock.patch.object(MODULE, "_post_image", side_effect=[False, True]) as image,
+                    mock.patch.object(MODULE, "_set_backlight", side_effect=[False, True]) as light,
+                    mock.patch.object(MODULE, "_start_animation") as animation,
+                ):
+                    MODULE._write_state(previous)
+                    MODULE._write_focus_marker({"turn_id": "old-turn"})
+                    Path(MODULE.PENDING_EVENT_FILE).write_text('{"hook_event_name":"PermissionRequest"}')
+                    self.assertEqual(MODULE.run({"hook_event_name": "Interrupt"}), 0)
+                    self.assertEqual(MODULE._read_state(), "idle")
+                    self.assertFalse(os.path.exists(MODULE.FOCUS_MARKER))
+                    self.assertTrue(os.path.exists(MODULE.IDLE_REFRESH_MARKER))
+                    self.assertTrue(os.path.exists(MODULE.PENDING_EVENT_FILE))
+                    MODULE._retry_pending_event()
+                    self.assertFalse(os.path.exists(MODULE.PENDING_EVENT_FILE))
+                    self.assertEqual(image.call_args_list, [mock.call(251)] * 2)
+                    self.assertEqual(light.call_args_list, [mock.call("rainbow", None)] * 2)
+                    animation.assert_not_called()
+
+    def test_example_config_registers_interrupt(self):
+        config = MODULE.json.loads(SCRIPT.with_name("codex_ipstube_hooks.example.json").read_text())
+        hook = config["hooks"]["Interrupt"][0]["hooks"][0]
+        self.assertEqual(hook["type"], "command")
+        self.assertIn("codex_ipstube_status.py", hook["command"])
+        self.assertLessEqual(hook["timeout"], 3)
 
     @mock.patch.object(MODULE.subprocess, "run")
     def test_frontmost_bundle_id_accepts_macos_output_formats(self, run):
