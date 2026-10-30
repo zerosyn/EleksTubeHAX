@@ -22,6 +22,8 @@ DEFAULT_IPSTUBE_PROXY = ""
 DEFAULT_STATUS_SCREEN = 0
 DEFAULT_WORK_ANIMATION = "matrix"
 DEFAULT_IDLE_REFRESH_SECONDS = 300
+USAGE_QUERY_ATTEMPTS = 3
+USAGE_RETRY_SECONDS = 2
 WAIT_ANIMATION = "swirl"
 DONE_ANIMATION = "squares"
 WAIT_BACKLIGHT_COLOR = "#FF8000"
@@ -31,6 +33,7 @@ FOCUS_MARKER = "/tmp/codex-ipstube-done"
 FOCUS_LOCK = "/tmp/codex-ipstube-focus.lock"
 STATE_FILE = "/tmp/codex-ipstube-state.json"
 PENDING_EVENT_FILE = "/tmp/codex-ipstube-pending.json"
+HOOK_QUEUE_DIR = "/tmp/codex-ipstube-events"
 CODEX_INSTANCE_FILE = "/tmp/codex-ipstube-codex-instance"
 IDLE_REFRESH_MARKER = "/tmp/codex-ipstube-refresh-idle"
 IDLE_BMP = "/tmp/codex-ipstube-idle.bmp"
@@ -399,6 +402,16 @@ def _extract_rate_limits(result):
 
 
 def _rate_limits():
+    for attempt in range(USAGE_QUERY_ATTEMPTS):
+        limits = _read_rate_limits()
+        if limits is not None:
+            return limits
+        if attempt + 1 < USAGE_QUERY_ATTEMPTS:
+            time.sleep(USAGE_RETRY_SECONDS)
+    return None
+
+
+def _read_rate_limits():
     executable = _codex_binary()
     if executable is None:
         return None
@@ -667,29 +680,44 @@ def _uses_auto_review(hook_input):
 
 
 def run(hook_input):
+    if image_for_event(hook_input.get("hook_event_name")) is None:
+        return 0
+    # Queue before taking the device lock: hooks can expire while waiting for it.
+    os.makedirs(HOOK_QUEUE_DIR, exist_ok=True)
+    path = os.path.join(
+        HOOK_QUEUE_DIR, "%020d-%d.json" % (time.monotonic_ns(), os.getpid())
+    )
+    event = {
+        key: hook_input[key]
+        for key in ("hook_event_name", "session_id", "turn_id", "transcript_path")
+        if key in hook_input
+    }
+    with open(path + ".tmp", "w", encoding="utf-8") as handle:
+        json.dump(event, handle)
+    os.replace(path + ".tmp", path)
+    _with_focus_lock(_retry_pending_event)
+    return 0
+
+
+def _persist_event(hook_input):
     event_name = hook_input.get("hook_event_name")
     if event_name == "PermissionRequest" and _uses_auto_review(hook_input):
         # Automatic review is ongoing work; no human approval is pending here.
         event_name = "PostToolUse"
     image = image_for_event(event_name)
     if image is None:
-        return 0
+        return
 
-    def update_status():
-        # Persist before network I/O: hooks can time out or the device can be offline.
-        with open(PENDING_EVENT_FILE + ".tmp", "w", encoding="utf-8") as handle:
-            json.dump({"hook_event_name": event_name}, handle)
-        os.replace(PENDING_EVENT_FILE + ".tmp", PENDING_EVENT_FILE)
-        _write_state(EVENT_STATES[event_name])
-        _clear_focus_marker()
-        if EVENT_STATES[event_name] == "idle":
-            _request_idle_refresh()
-        if event_name == "Stop":
-            _write_focus_marker(hook_input)
-        _deliver_event(event_name)
-
-    _with_focus_lock(update_status)
-    return 0
+    # Called under the device lock; acknowledge the queued event only after this.
+    with open(PENDING_EVENT_FILE + ".tmp", "w", encoding="utf-8") as handle:
+        json.dump({"hook_event_name": event_name}, handle)
+    os.replace(PENDING_EVENT_FILE + ".tmp", PENDING_EVENT_FILE)
+    _write_state(EVENT_STATES[event_name])
+    _clear_focus_marker()
+    if EVENT_STATES[event_name] == "idle":
+        _request_idle_refresh()
+    if event_name == "Stop":
+        _write_focus_marker(hook_input)
 
 
 def _clear_pending_event():
@@ -714,6 +742,19 @@ def _deliver_event(event_name):
 
 
 def _retry_pending_event():
+    try:
+        queued = sorted(os.listdir(HOOK_QUEUE_DIR))
+    except FileNotFoundError:
+        queued = []
+    for name in queued:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(HOOK_QUEUE_DIR, name)
+        with open(path, encoding="utf-8") as handle:
+            hook_input = json.load(handle)
+        _persist_event(hook_input)
+        os.unlink(path)
+
     try:
         with open(PENDING_EVENT_FILE, encoding="utf-8") as handle:
             event_name = json.load(handle).get("hook_event_name")

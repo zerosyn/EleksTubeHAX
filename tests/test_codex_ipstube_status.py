@@ -22,6 +22,67 @@ class CodexIPSTubeStatusTests(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+        queue_patcher = mock.patch.object(
+            MODULE, "HOOK_QUEUE_DIR", os.path.join(temporary.name, "events")
+        )
+        queue_patcher.start()
+        self.addCleanup(queue_patcher.stop)
+
+    def test_stop_survives_timeout_waiting_for_device_lock(self):
+        with (
+            mock.patch.object(MODULE, "_with_focus_lock", side_effect=TimeoutError),
+            mock.patch.object(MODULE, "_write_state") as state,
+        ):
+            with self.assertRaises(TimeoutError):
+                MODULE.run({"hook_event_name": "Stop", "turn_id": "ended", "session_id": "session"})
+            state.assert_not_called()
+        self.assertEqual(len(os.listdir(MODULE.HOOK_QUEUE_DIR)), 1)
+        with (
+            mock.patch.object(MODULE, "_write_state") as state,
+            mock.patch.object(MODULE, "_clear_focus_marker"),
+            mock.patch.object(MODULE, "_write_focus_marker") as marker,
+            mock.patch.object(MODULE, "_deliver_event") as deliver,
+        ):
+            MODULE._retry_pending_event()
+            state.assert_called_once_with("done")
+            marker.assert_called_once_with({"hook_event_name": "Stop", "turn_id": "ended", "session_id": "session"})
+            deliver.assert_called_once_with("Stop")
+        self.assertEqual(os.listdir(MODULE.HOOK_QUEUE_DIR), [])
+
+    def test_queued_events_preserve_order_without_saving_tool_arguments(self):
+        with mock.patch.object(MODULE, "_with_focus_lock", side_effect=TimeoutError):
+            for event in ("PermissionRequest", "PostToolUse", "Stop"):
+                with self.assertRaises(TimeoutError):
+                    MODULE.run({"hook_event_name": event, "tool_input": {"command": "private"}})
+        for path in Path(MODULE.HOOK_QUEUE_DIR).glob("*.json"):
+            self.assertNotIn("private", path.read_text())
+        with (
+            mock.patch.object(MODULE, "_write_state") as state,
+            mock.patch.object(MODULE, "_clear_focus_marker"),
+            mock.patch.object(MODULE, "_write_focus_marker"),
+            mock.patch.object(MODULE, "_deliver_event") as deliver,
+        ):
+            MODULE._retry_pending_event()
+            self.assertEqual(state.call_args_list, [mock.call("wait"), mock.call("work"), mock.call("done")])
+            deliver.assert_called_once_with("Stop")
+
+    def test_event_stays_queued_until_state_is_persisted(self):
+        with (
+            mock.patch.object(MODULE, "_with_focus_lock", side_effect=lambda cb: cb()),
+            mock.patch.object(MODULE, "_write_state", side_effect=TimeoutError),
+        ):
+            with self.assertRaises(TimeoutError):
+                MODULE.run({"hook_event_name": "Stop"})
+        self.assertEqual(len(os.listdir(MODULE.HOOK_QUEUE_DIR)), 1)
+        with (
+            mock.patch.object(MODULE, "_write_state"),
+            mock.patch.object(MODULE, "_clear_focus_marker"),
+            mock.patch.object(MODULE, "_write_focus_marker"),
+            mock.patch.object(MODULE, "_deliver_event") as deliver,
+        ):
+            MODULE._retry_pending_event()
+            deliver.assert_called_once_with("Stop")
+        self.assertEqual(os.listdir(MODULE.HOOK_QUEUE_DIR), [])
 
     def test_failed_resume_is_retried_until_animation_and_light_succeed(self):
         with (
@@ -64,6 +125,62 @@ class CodexIPSTubeStatusTests(unittest.TestCase):
         self.assertEqual(MODULE.image_for_event("PostToolUse"), 252)
         self.assertEqual(MODULE.image_for_event("Stop"), 254)
         self.assertIsNone(MODULE.image_for_event("PreToolUse"))
+
+    def test_usage_query_retries_failure_and_stops_on_success(self):
+        limits = {"five_hour": (91, "02:55"), "weekly": (91, "11-05")}
+        for failures in (0, 1, 2):
+            with (
+                self.subTest(failures=failures),
+                mock.patch.object(MODULE, "_read_rate_limits", side_effect=[None] * failures + [limits]) as query,
+                mock.patch.object(MODULE.time, "sleep") as sleep,
+            ):
+                self.assertEqual(MODULE._rate_limits(), limits)
+                self.assertEqual(query.call_count, failures + 1)
+                self.assertEqual(sleep.call_args_list, [mock.call(2)] * failures)
+
+    def test_usage_query_gives_up_after_three_attempts(self):
+        with (
+            mock.patch.object(MODULE, "_read_rate_limits", return_value=None) as query,
+            mock.patch.object(MODULE.time, "sleep") as sleep,
+        ):
+            self.assertIsNone(MODULE._rate_limits())
+            self.assertEqual(query.call_count, 3)
+            self.assertEqual(sleep.call_args_list, [mock.call(2), mock.call(2)])
+
+    def test_usage_retry_does_not_replace_work_with_idle_display(self):
+        with tempfile.TemporaryDirectory() as directory:
+            calls = []
+
+            def query():
+                calls.append(True)
+                if len(calls) == 1:
+                    MODULE._write_state("work")
+                    return None
+                return {"five_hour": (91, "02:55")}
+
+            def sleep(seconds):
+                if seconds == 1.0:
+                    raise StopIteration
+
+            with (
+                mock.patch.object(MODULE, "STATE_FILE", os.path.join(directory, "state")),
+                mock.patch.object(MODULE, "IDLE_REFRESH_MARKER", os.path.join(directory, "refresh")),
+                mock.patch.object(MODULE, "FOCUS_MARKER", os.path.join(directory, "done")),
+                mock.patch.object(MODULE, "_with_focus_lock", side_effect=lambda cb: cb()),
+                mock.patch.object(MODULE, "_read_codex_instance", return_value="pid:1"),
+                mock.patch.object(MODULE, "_codex_application_instance", return_value="pid:1"),
+                mock.patch.object(MODULE, "_read_rate_limits", side_effect=query),
+                mock.patch.object(MODULE, "_display_limits") as display,
+                mock.patch.object(MODULE, "_daemon_log"),
+                mock.patch.object(MODULE.time, "sleep", side_effect=sleep),
+            ):
+                MODULE._write_state("idle")
+                MODULE._request_idle_refresh()
+                with self.assertRaises(StopIteration):
+                    MODULE.focus_daemon()
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(MODULE._read_state(), "work")
+                display.assert_not_called()
 
     def test_automatic_review_keeps_work_and_retries_work_instead_of_wait(self):
         with tempfile.TemporaryDirectory() as directory:
