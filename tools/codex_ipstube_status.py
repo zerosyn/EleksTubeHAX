@@ -31,7 +31,9 @@ DONE_BACKLIGHT_COLOR = "#00FF00"
 CODEX_BUNDLE_ID = "com.openai.codex"
 FOCUS_MARKER = "/tmp/codex-ipstube-done"
 FOCUS_LOCK = "/tmp/codex-ipstube-focus.lock"
+BACKLIGHT_LOCK = "/tmp/ipstube-backlight.lock"
 STATE_FILE = "/tmp/codex-ipstube-state.json"
+PEER_STATE_FILE = "/tmp/antigravity-ipstube-state.json"
 PENDING_EVENT_FILE = "/tmp/codex-ipstube-pending.json"
 HOOK_QUEUE_DIR = "/tmp/codex-ipstube-events"
 CODEX_INSTANCE_FILE = "/tmp/codex-ipstube-codex-instance"
@@ -91,6 +93,10 @@ EVENT_BACKLIGHTS = {
     "PostToolUse": ("rainbow", None),
     "PermissionRequest": ("pulse", WAIT_BACKLIGHT_COLOR),
     "Stop": ("breath", DONE_BACKLIGHT_COLOR),
+}
+STATE_BACKLIGHTS = {
+    "wait": ("pulse", WAIT_BACKLIGHT_COLOR),
+    "done": ("breath", DONE_BACKLIGHT_COLOR),
 }
 
 
@@ -221,6 +227,30 @@ def _set_backlight(effect, color=None):
     return _post_json("/api/backlight", payload)
 
 
+def _with_backlight_lock(callback):
+    try:
+        with open(BACKLIGHT_LOCK, "a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            return callback()
+    except OSError:
+        return callback()
+
+
+def _resolve_backlight(event_name):
+    state = EVENT_STATES.get(event_name)
+    if state in ("wait", "done"):
+        return EVENT_BACKLIGHTS[event_name]
+    peer_state = _read_peer_state()
+    if peer_state in STATE_BACKLIGHTS:
+        return STATE_BACKLIGHTS[peer_state]
+    return EVENT_BACKLIGHTS[event_name]
+
+
+def _apply_backlight(event_name):
+    # Acquire FOCUS_LOCK -> BACKLIGHT_LOCK only; never reverse this lock order.
+    return _with_backlight_lock(lambda: _set_backlight(*_resolve_backlight(event_name)))
+
+
 def _animation_for_event(event_name):
     if event_name in WORK_EVENTS:
         return os.environ.get("IPSTUBE_WORK_ANIMATION", DEFAULT_WORK_ANIMATION)
@@ -270,13 +300,21 @@ def _write_state(state):
             pass
 
 
-def _read_state():
+def _read_state_file(path):
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as handle:
+        with open(path, "r", encoding="utf-8") as handle:
             value = json.load(handle)
         return value.get("state") if isinstance(value, dict) else None
     except Exception:
         return None
+
+
+def _read_state():
+    return _read_state_file(STATE_FILE)
+
+
+def _read_peer_state():
+    return _read_state_file(PEER_STATE_FILE)
 
 
 def _write_focus_marker(hook_input):
@@ -736,7 +774,7 @@ def _deliver_event(event_name):
             _post_image(image_for_event(event_name))
     else:
         display_updated = _post_image(image_for_event(event_name))
-    backlight_updated = _set_backlight(*EVENT_BACKLIGHTS[event_name])
+    backlight_updated = _apply_backlight(event_name)
     if display_updated and backlight_updated:
         _clear_pending_event()
 
@@ -927,7 +965,7 @@ def focus_daemon():
                 _clear_pending_event()
                 _write_state("idle")
                 image_updated = _display_limits(limits)
-                backlight_updated = _set_backlight(*EVENT_BACKLIGHTS["SessionStart"])
+                backlight_updated = _apply_backlight("SessionStart")
                 if image_updated and backlight_updated:
                     _clear_focus_marker()
 
@@ -957,7 +995,7 @@ def main():
             _clear_pending_event()
             _write_state("idle")
             updated = _refresh_idle_display()
-            _set_backlight(*EVENT_BACKLIGHTS["SessionStart"])
+            _apply_backlight("SessionStart")
             return updated
 
         updated = _with_focus_lock(refresh_idle)

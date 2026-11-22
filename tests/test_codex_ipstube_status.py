@@ -27,6 +27,16 @@ class CodexIPSTubeStatusTests(unittest.TestCase):
         )
         queue_patcher.start()
         self.addCleanup(queue_patcher.stop)
+        peer_patcher = mock.patch.object(
+            MODULE, "PEER_STATE_FILE", os.path.join(temporary.name, "peer-state.json")
+        )
+        peer_patcher.start()
+        self.addCleanup(peer_patcher.stop)
+        lock_patcher = mock.patch.object(
+            MODULE, "BACKLIGHT_LOCK", os.path.join(temporary.name, "backlight.lock")
+        )
+        lock_patcher.start()
+        self.addCleanup(lock_patcher.stop)
 
     def test_stop_survives_timeout_waiting_for_device_lock(self):
         with (
@@ -547,6 +557,40 @@ class CodexIPSTubeStatusTests(unittest.TestCase):
                         MODULE.focus_daemon()
                 self.assertEqual(run.call_args_list, [mock.call({"hook_event_name": "SessionStart"})] * expected_events)
                 self.assertEqual(write_instance.call_args_list, expected_writes)
+
+    def test_backlight_coordination_overwrites_on_wait_done_and_preserves_peer_on_work_idle(self):
+        for peer_state in ("wait", "done", "work", "idle", None):
+            with self.subTest(peer_state=peer_state), tempfile.TemporaryDirectory() as directory:
+                peer_file = os.path.join(directory, "peer-state.json")
+                if peer_state is not None:
+                    Path(peer_file).write_text(MODULE.json.dumps({"state": peer_state}))
+                with (
+                    mock.patch.object(MODULE, "PEER_STATE_FILE", peer_file),
+                    mock.patch.object(MODULE, "STATE_FILE", os.path.join(directory, "state.json")),
+                    mock.patch.object(MODULE, "FOCUS_MARKER", os.path.join(directory, "done")),
+                    mock.patch.object(MODULE, "FOCUS_LOCK", os.path.join(directory, "focus.lock")),
+                    mock.patch.object(MODULE, "IDLE_REFRESH_MARKER", os.path.join(directory, "refresh")),
+                    mock.patch.object(MODULE, "_start_animation", return_value=True),
+                    mock.patch.object(MODULE, "_post_image", return_value=True),
+                    mock.patch.object(MODULE, "_set_backlight", return_value=True) as light,
+                ):
+                    MODULE.run({"hook_event_name": "PermissionRequest"})
+                    MODULE.run({"hook_event_name": "Stop"})
+                    MODULE.run({"hook_event_name": "PostToolUse"})
+                    MODULE.run({"hook_event_name": "SessionStart"})
+                    expected_passive = {
+                        "wait": mock.call("pulse", "#FF8000"),
+                        "done": mock.call("breath", "#00FF00"),
+                    }.get(peer_state, mock.call("rainbow", None))
+                    self.assertEqual(
+                        light.call_args_list,
+                        [
+                            mock.call("pulse", "#FF8000"),
+                            mock.call("breath", "#00FF00"),
+                            expected_passive,
+                            expected_passive,
+                        ],
+                    )
 
 
 if __name__ == "__main__":

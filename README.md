@@ -1014,6 +1014,8 @@ The current implementation is macOS-only. It uses `fcntl`, `/usr/bin/curl`, `/bi
 
 Animation requests use the image fallback only when the animation API fails. Returning to Codex after DONE changes the display to IDLE within about one second. The focus watcher detects the Codex application (`com.openai.codex`), not an individual Codex task window.
 
+When the Antigravity status integration (`5.8`) is also active, ambient backlight updates are coordinated bidirectionally via `/tmp/ipstube-backlight.lock` and `/tmp/antigravity-ipstube-state.json`: entering `WAIT` (`#FF8000` pulse) or `DONE` (`#00FF00` breath) directly overwrites the ambient light, while returning to `WORK` or `IDLE` preserves the peer's active `WAIT` or `DONE` backlight and restores `rainbow` only when neither integration is in `WAIT`/`DONE`.
+
 Hook events are saved atomically before waiting for the device lock. If a hook expires while the background service is busy, its event remains queued for the service to process. Queued events are applied in arrival order before sending the latest device update. If either the animation or backlight request fails, the focus watcher retries until both succeed. New events replace pending updates, so an old WAIT is not replayed after WORK. In Approve for me mode, `PermissionRequest` keeps WORK active during automatic review and tool execution. The script reads `approvals_reviewer` from the latest `turn_context` in the hook's `transcript_path`, checking `turn_id` when supplied. This transcript format is not a stable hook interface; missing, unreadable, or mismatched context falls back to WAIT. Manual approval resumes WORK on `PostToolUse`, after the tool finishes.
 
 The dynamic IDLE image is generated on the Mac from `data/251.bmp`. It moves the black-hole artwork upward, removes the `IDLE` label, and places two rounded allowance bars below it. The first line, such as `96% 03:34`, shows the remaining five-hour allowance and its local reset time. The second line, such as `94% 09-19`, shows the remaining weekly allowance and its local reset date. The vertical order distinguishes the two windows without adding `5H` or `7D` labels. The watcher detects a newly launched `com.openai.codex` application instance, while `SessionStart` covers task lifecycle starts; either event requests an immediate refresh without blocking Codex startup. The watcher then refreshes the data every five minutes only while the integration is in IDLE state, and uploads image 249 only when its BMP content changes. If Codex usage lookup, rendering, or upload fails, image 251 remains the offline fallback.
@@ -1181,6 +1183,131 @@ rm -f "${CODEX_HOME:-$HOME/.codex}/hooks/codex_ipstube_idle_template.bmp"
 ```
 
 Finally, remove only the IPSTube handlers from `~/.codex/hooks.json`; preserve all other global hooks.
+
+### 5.8 IPSTube Antigravity status integration (macOS)
+
+This integration mirrors the Codex workflow (`5.7`) for Google Antigravity App on macOS. Like the Codex integration, it is macOS-only (using `fcntl`, `/usr/bin/curl`, `/bin/ps`, `/usr/sbin/lsof`, `/usr/bin/lsappinfo`, and a user LaunchAgent) and requires a one-time installation outside this repository.
+
+#### 5.8.1 What the integration does
+
+| State | Antigravity event or condition | Screen 1 (default) | Ambient light | Image fallback |
+| --- | --- | --- | --- | --- |
+| INIT / IDLE | App launch, `SessionStart`, `Stop` with `USER_CANCELED`, rejected `WAIT`, or Antigravity becomes frontmost after DONE | dynamic image 248 | `rainbow` (or peer `WAIT`/`DONE` if active) | image 251 |
+| WORK | `PreInvocation`, `PostToolUse`, `PostInvocation`, or live trajectory `RUNNING` | `matrix` | `rainbow` (or peer `WAIT`/`DONE` if active) | image 252 |
+| WAIT | Live trajectory `WAITING` (e.g. `CASCADE_RUN_STATUS_WAITING_FOR_USER`) | `swirl` | orange `#FF8000` pulse (direct overwrite) | image 253 |
+| DONE | `Stop` (non-cancel) or completed trajectory | `squares` | green `#00FF00` breath (direct overwrite) | image 254 |
+
+Backlight coordination with Codex (`5.7`) is bidirectional via `/tmp/ipstube-backlight.lock` and `/tmp/codex-ipstube-state.json`:
+- Entering `WAIT` or `DONE` on either Codex or Antigravity always overwrites the ambient backlight immediately.
+- Returning to `WORK` or `IDLE` checks the peer's state first; if the peer is in `WAIT` or `DONE`, its alert backlight is kept/restored instead of switching back to `rainbow`.
+
+Unlike Codex's black-hole IDLE template, the Antigravity IDLE screen (`248`) renders a 135×240 8-bit indexed BMP on a pure black background (no black-hole artwork and no white pixels) showing four rounded quota bars and reset times from top to bottom:
+1. **Gemini general 5-hour remaining** (`gemini-5h`, `%H:%M`, light green `#90EEA8`)
+2. **Gemini general weekly remaining** (`gemini-weekly`, `%m-%d`, light green `#90EEA8`)
+3. **Claude & GPT 5-hour remaining** (`3p-5h`, `%H:%M`, light orange `#FFC080`)
+4. **Claude & GPT weekly remaining** (`3p-weekly`, `%m-%d`, light orange `#FFC080`)
+
+Because Antigravity's official `hooks.json` schema provides `SessionStart`, `PreInvocation`, `PostToolUse`, `PostInvocation`, and `Stop` (without a `PermissionRequest` hook), the background daemon combines those hooks with local `language_server` Connect-RPC discovery via `~/.gemini/antigravity/daemon/*.json` (with `/bin/ps` + `/usr/sbin/lsof` fallback for older builds):
+- Quota queries call `exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary` up to three times with a two-second delay before falling back to `GetUserStatus`; if any of the four buckets are still missing while the app is running, the IDLE daemon retries every 15 seconds until complete.
+- Live trajectory polling calls `GetAllCascadeTrajectories` every second to detect `WAITING` states immediately, resume `WORK` on approval, and return to `IDLE` on cancel.
+- Hook invocations always print `{}` to stdout and exit `0` without storing user prompts or tool arguments.
+
+#### 5.8.2 Source files
+
+Keep these repository files as the version-controlled source of truth:
+
+- `tools/antigravity_ipstube_status.py` — lifecycle hook, local `language_server` RPC client, BMP quota renderer, and focus/status daemon.
+- `tools/antigravity_ipstube_hooks.example.json` — global Antigravity `hooks.json` entry (`ipstube-status`).
+- `tools/com.zero.antigravity-ipstube-focus.plist` — macOS user LaunchAgent.
+
+#### 5.8.3 Agent installation checklist
+
+An agent performing this setup must run as the logged-in macOS user, not as root, and must preserve any existing entries in `~/.gemini/config/hooks.json`. Because default screen `1` is assigned to `M2` in the factory layout, configure the clock layout via `PUT /api/clock-layout` (or the web console) so screen `1` is `MANUAL` when running Codex on screen `0` and Antigravity on screen `1` side by side.
+
+1. Confirm that the clock is reachable from the Mac:
+
+   ```bash
+   curl -sS --max-time 5 http://ipstube.home/api/config
+   ```
+
+2. Review per-machine settings:
+
+   | Setting | Repository default | Notes |
+   | --- | --- | --- |
+   | `IPSTUBE_URL` | `http://ipstube.home` | Clock base URL. |
+   | `IPSTUBE_PROXY` | empty (direct LAN connection) | Set only if a proxy is required. |
+   | `IPSTUBE_STATUS_SCREEN` | `1` | Valid values `0`–`5`. Ensure the chosen screen has `clock: "MANUAL"`. |
+   | `IPSTUBE_WORK_ANIMATION` | `matrix` | Animation preset during `WORK`. |
+   | `IPSTUBE_IDLE_REFRESH_SECONDS` | `300` | Quota refresh interval while `IDLE` (clamped `>= 60`). |
+   | `ANTIGRAVITY_BUNDLE_ID` | `com.google.antigravity` | Optional override for frontmost focus detection. |
+   | `ANTIGRAVITY_APP_EXECUTABLE` | `/Applications/Antigravity.app/Contents/MacOS/Antigravity` | Optional override for app process detection. |
+   | `ANTIGRAVITY_DAEMON_DIR` | `~/.gemini/antigravity/daemon` | Optional override for `language_server` daemon discovery JSON files. |
+   | `ANTIGRAVITY_LS_URL` / `ANTIGRAVITY_CSRF_TOKEN` | auto-discovered | Optional manual override for `language_server` RPC. |
+
+3. Install the hook script into `~/.gemini/config/hooks`:
+
+   ```bash
+   mkdir -p "$HOME/.gemini/config/hooks"
+   install -m 755 tools/antigravity_ipstube_status.py "$HOME/.gemini/config/hooks/antigravity_ipstube_status.py"
+   ```
+
+4. Install or merge `~/.gemini/config/hooks.json`:
+
+   - If `~/.gemini/config/hooks.json` does not exist, copy `tools/antigravity_ipstube_hooks.example.json` to it.
+   - If it already exists, merge the `"ipstube-status"` top-level key while preserving all unrelated hook groups.
+   - If custom `IPSTUBE_URL` / `IPSTUBE_PROXY` / `IPSTUBE_STATUS_SCREEN` settings are needed, prefix each hook `command` accordingly.
+
+5. Install and load the LaunchAgent:
+
+   ```bash
+   PLIST="$HOME/Library/LaunchAgents/com.zero.antigravity-ipstube-focus.plist"
+   mkdir -p "$HOME/Library/LaunchAgents"
+   install -m 644 tools/com.zero.antigravity-ipstube-focus.plist "$PLIST"
+   /usr/bin/python3 -c '
+import os, plistlib, sys
+p = sys.argv[1]
+with open(p, "rb") as f:
+    d = plistlib.load(f)
+d["ProgramArguments"][1] = os.path.expanduser("~/.gemini/config/hooks/antigravity_ipstube_status.py")
+with open(p, "wb") as f:
+    plistlib.dump(d, f)
+' "$PLIST"
+   plutil -lint "$PLIST"
+
+   USER_DOMAIN="gui/$(id -u)"
+   LABEL="com.zero.antigravity-ipstube-focus"
+   launchctl bootout "$USER_DOMAIN/$LABEL" 2>/dev/null || true
+   launchctl bootstrap "$USER_DOMAIN" "$PLIST"
+   launchctl kickstart -k "$USER_DOMAIN/$LABEL"
+   launchctl print "$USER_DOMAIN/$LABEL"
+   ```
+
+   Diagnostic logs are written to `/tmp/antigravity-ipstube-focus.log`.
+
+#### 5.8.4 Verification
+
+```bash
+printf '%s' '{"hookEventName":"PreInvocation"}' | \
+  /usr/bin/python3 "$HOME/.gemini/config/hooks/antigravity_ipstube_status.py"
+/usr/bin/python3 "$HOME/.gemini/config/hooks/antigravity_ipstube_status.py" --refresh-idle
+curl -sS --max-time 5 http://ipstube.home/api/config
+```
+
+On success, screen `1` shows `current_image: 248` with the four color-coded quota bars.
+
+#### 5.8.5 Updating or uninstalling
+
+To update, reinstall `tools/antigravity_ipstube_status.py` over `~/.gemini/config/hooks/antigravity_ipstube_status.py` and restart the `com.zero.antigravity-ipstube-focus` LaunchAgent. To uninstall:
+
+```bash
+USER_DOMAIN="gui/$(id -u)"
+LABEL="com.zero.antigravity-ipstube-focus"
+launchctl bootout "$USER_DOMAIN/$LABEL" 2>/dev/null || true
+rm -f "$HOME/Library/LaunchAgents/$LABEL.plist"
+rm -f "$HOME/.gemini/config/hooks/antigravity_ipstube_status.py"
+```
+
+Then remove the `"ipstube-status"` entry from `~/.gemini/config/hooks.json`.
 
 ## 6\. Known problems/limitations, Notes
 

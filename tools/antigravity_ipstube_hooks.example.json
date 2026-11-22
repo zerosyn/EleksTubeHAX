@@ -1,0 +1,37 @@
+{
+  "ipstube-status": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "/usr/bin/python3 ~/.gemini/config/hooks/antigravity_ipstube_status.py",
+        "timeout": 2
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "/usr/bin/python3 ~/.gemini/config/hooks/antigravity_ipstube_status.py",
+        "timeout": 2
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 ~/.gemini/config/hooks/antigravity_ipstube_status.py",
+            "timeout": 2
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "/usr/bin/python3 ~/.gemini/config/hooks/antigravity_ipstube_status.py",
+        "timeout": 2
+      }
+    ]
+  }
+}
